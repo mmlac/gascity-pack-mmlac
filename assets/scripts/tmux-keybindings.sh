@@ -6,6 +6,9 @@ CONFIGDIR="$1"
 # Socket-aware tmux command (uses GC_TMUX_SOCKET when set).
 gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
 
+# ── Mouse support (scrolling, pane select, drag-to-resize) ────────────
+gcmux set -g mouse on
+
 # ── Navigation bindings (prefix table) ────────────────────────────────
 "$CONFIGDIR"/assets/scripts/bind-key.sh n "run-shell '$CONFIGDIR/assets/scripts/cycle.sh next #{session_name} #{client_tty}'"
 "$CONFIGDIR"/assets/scripts/bind-key.sh p "run-shell '$CONFIGDIR/assets/scripts/cycle.sh prev #{session_name} #{client_tty}'"
