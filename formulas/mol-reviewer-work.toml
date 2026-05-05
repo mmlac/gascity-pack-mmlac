@@ -1,0 +1,341 @@
+description = """
+Reviewer work lifecycle — code review gate between polecat and refinery.
+
+A polecat finishes implementation, pushes its branch, and reassigns the
+work bead to the Reviewer pool. A reviewer claims the bead, fetches the
+branch, diffs it against `metadata.target`, and renders judgment against
+five focus areas: security, architectural gaps, missing tests, dead code,
+and missing edge cases.
+
+The reviewer NEVER modifies code. Findings live in the bead notes; the
+polecat fixes.
+
+## Reviewer Contract (Self-Cleaning Pool Model)
+
+1. Receive work (bead routed to the reviewer pool, you claim it)
+2. Follow steps in order (read descriptions, execute, move to next)
+3. Route: forward to refinery on pass, return to polecat pool on findings
+4. You are GONE — drain-ack and exit
+
+**No MR beads.** Work beads flow:
+pool → polecat → reviewer → refinery → closed
+                       ↑________↓ (rejection on findings)
+
+The reviewer reads `metadata.branch` and `metadata.target` set by the
+polecat. On pass, sets `metadata.review_status=pass` and reassigns to
+`{{binding_prefix}}refinery`. On findings, sets
+`metadata.review_status=findings`, `metadata.rejection_reason`, routes
+back to `{{binding_prefix}}polecat`, and clears the assignee.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | caller | The work bead ID assigned to this reviewer |
+| binding_prefix | rig config | Pool prefix used to compute reviewer/refinery/polecat targets |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| `metadata.branch` missing | Reject to polecat pool, `rejection_reason="missing branch metadata"` |
+| Branch missing on origin | Reject to polecat pool, `rejection_reason="branch not on origin"` |
+| Diff is enormous (>2k LOC) | Review what you can, escalate to mayor for split |
+| Uncertain on a security claim | Mail mayor BEFORE routing — do not guess |
+| Context filling | `gc runtime request-restart` (rare; reviews should be short) |"""
+formula = "mol-reviewer-work"
+version = 1
+
+[vars]
+[vars.issue]
+description = "The work bead ID assigned to this reviewer"
+required = true
+
+[vars.binding_prefix]
+description = "Pool binding prefix (matches the polecat/refinery/reviewer pool names)"
+default = ""
+
+[[steps]]
+id = "load-assignment"
+title = "Load the assignment and metadata"
+description = """
+Initialize your session and understand the review.
+
+**1. Prime your environment:**
+```bash
+gc prime
+gc bd prime
+```
+
+**2. Read the bead and metadata:**
+```bash
+gc bd show {{issue}}
+gc bd show {{issue}} --json | jq '.[0].metadata'
+```
+
+**Expected metadata (set by the polecat):**
+- `branch` — source branch name (REQUIRED; reject if missing)
+- `target` — target branch (default: rig's default branch)
+- `work_dir` — polecat's worktree (informational; do not edit there)
+
+**3. Check for a resubmission:**
+
+If `metadata.review_status=findings` is present from a prior cycle, the
+polecat has resubmitted after addressing earlier findings. The full
+prior report is in the bead notes — read it. Focus this review on
+whether each `block` finding from the prior report was actually
+addressed, plus a fresh pass over the new diff.
+
+**4. Check inbox for handoffs:**
+```bash
+gc mail inbox
+```
+Read any HANDOFF or assignment messages, then archive after absorbing
+context.
+
+**Exit criteria:** You understand what changed, why, and what (if
+anything) was previously flagged."""
+
+[[steps]]
+id = "fetch-and-diff"
+title = "Fetch the branch and prepare the diff for inspection"
+needs = ["load-assignment"]
+description = """
+Fetch the branch from origin and make the diff readable. This is
+read-only inspection — you do NOT commit, push, or modify anything.
+
+**1. Read branch + target from metadata:**
+```bash
+BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+TARGET=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.target // empty')
+
+if [ -z "$BRANCH" ]; then
+    echo "metadata.branch missing — rejecting to polecat pool."
+    # Jump to route-bead with rejection_reason="missing branch metadata"
+    exit 0
+fi
+TARGET="${TARGET:-$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')}"
+```
+
+**2. Fetch and verify branch exists on origin:**
+```bash
+git fetch --prune origin
+if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    echo "origin/$BRANCH does not exist — rejecting to polecat pool."
+    # Jump to route-bead with rejection_reason="branch not on origin"
+    exit 0
+fi
+```
+
+**3. Check out a local review branch (read-only inspection):**
+```bash
+LOCAL="review/{{issue}}"
+git checkout -B "$LOCAL" "origin/$BRANCH"
+```
+
+Re-using `review/{{issue}}` per bead keeps cleanup trivial — next
+review on the same bead overwrites, and stale review branches from
+crashed sessions can be deleted by branch-name pattern.
+
+**4. Render the diff for review:**
+```bash
+git diff "origin/$TARGET"...HEAD --stat
+git log "origin/$TARGET"..HEAD --oneline
+git diff "origin/$TARGET"...HEAD
+```
+
+**5. List changed files (you'll walk these in the review step):**
+```bash
+git diff --name-only "origin/$TARGET"...HEAD
+```
+
+**Exit criteria:** Diff fetched, local review branch checked out, file
+list available."""
+
+[[steps]]
+id = "review"
+title = "Review the diff against the five focus areas"
+needs = ["fetch-and-diff"]
+description = """
+Walk the diff once for each focus area. Take notes as you go. The notes
+become the report in the next step.
+
+A finding has:
+- **Severity:** `block` (must fix), `warn` (should fix), `nit` (suggestion)
+- **Category:** security / architecture / tests / dead code / edge case
+- **Location:** `path/to/file.ext:LINE` (post-diff line)
+- **Evidence:** quote the offending snippet or describe the hole
+- **Required action:** what the polecat must change
+
+### 1. Security
+- Untrusted input validated/sanitized at boundaries (HTTP, RPC, file, env)
+- Injection: SQL, shell, template, path traversal, deserialization
+- Auth/authz: missing checks, privilege escalation, identity confusion
+- Secrets: hardcoded keys/tokens/passwords/creds in diff or fixtures
+- Crypto misuse: weak algos, predictable randomness, unverified signatures
+- Logs/error paths leaking sensitive data
+- Dependency changes: new packages with known CVEs or unvetted source
+
+### 2. Architectural Gaps
+- Layering violations
+- Hidden coupling: shared mutable state, global registries, undocumented contracts
+- Wrong abstraction level (business logic in transport, transport in domain)
+- Concurrency: races, missing locks, blocking calls in async paths
+- Error semantics: silent swallowing, inconsistent types, retry storms
+- Resource lifecycle: leaks, missing cleanup
+- Scope creep: unrelated changes bundled in
+
+### 3. Missing Tests
+- Behavioral changes without a test that would have failed pre-change
+- Bug fixes without a regression test
+- New public surface (exports, endpoints, schemas) without coverage
+- Vacuous tests (pass without exercising the new code path)
+- Tests describing internals instead of contract
+- Mocked-out integration where a real boundary test belongs
+
+### 4. Dead Code
+- Functions/types/files added but unreferenced
+- Branches that can never execute given the surrounding code
+- Feature flags or fallbacks with no caller and no rollout plan
+- Commented-out code that should be deleted
+- Re-exports or shims with no consumer
+- Unused imports
+
+### 5. Missing Edge Cases
+- Boundary inputs: empty, zero, max, off-by-one, very-large/small
+- Nil/None/null/empty for every nullable input
+- Unicode, multi-byte, control characters where ASCII is assumed
+- Time: clock skew, leap seconds, DST, time zones, expired tokens
+- Concurrency: simultaneous requests, partial failures, idempotency
+- I/O: timeouts, slow networks, truncated reads, partial writes
+- Configuration: missing keys, malformed values, environmental drift
+
+### Walking the diff
+For each changed file:
+```bash
+git show "$LOCAL:path/to/file" | less   # current state on the branch
+git diff "origin/$TARGET"...HEAD -- path/to/file
+```
+For each added function/type/file: grep the diff and the working tree
+to confirm it has at least one caller.
+
+```bash
+git grep -nE "<symbol>"
+```
+
+If a focus area genuinely doesn't apply (e.g., docs-only change), note
+that explicitly — it's a checked dimension, not a skipped one.
+
+**Exit criteria:** You have one notes block per focus area (with
+"no findings" if clean), and a clear list of `block`/`warn`/`nit`
+findings."""
+
+[[steps]]
+id = "write-report"
+title = "Write the report to the bead notes"
+needs = ["review"]
+description = """
+Persist the FULL report into the bead notes. The notes are the durable
+record — the polecat reads them on rejection, and the capability ledger
+records them on close.
+
+```bash
+gc bd update {{issue}} --notes "$(cat <<'EOF'
+# Review: <branch> → <target>
+
+## Summary
+<1-3 sentence verdict>
+
+## Findings
+
+### Security
+- ...
+
+### Architecture
+- ...
+
+### Tests
+- ...
+
+### Dead Code
+- ...
+
+### Edge Cases
+- ...
+
+## Verdict
+<pass | findings>
+EOF
+)"
+```
+
+If a dimension is clean, write "no findings" under that heading so the
+report shows you actually checked. If you skipped a dimension because
+the change is docs-only or config-only, say so explicitly.
+
+Do not overwrite the notes later with a one-line summary. The full
+report stays. If you need to communicate routing context separately,
+add it to a follow-up note rather than replacing the report.
+
+**Exit criteria:** Bead notes contain the full report, and you have
+classified the verdict as `pass` (no `block` findings) or `findings`
+(at least one `block`)."""
+
+[[steps]]
+id = "route-bead"
+title = "Route the bead — pass to refinery, or reject to polecat pool — and exit"
+needs = ["write-report"]
+description = """
+Hand off the bead and self-clean. You cease to exist after this step.
+
+**On pass (no `block` findings):**
+```bash
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
+gc bd update {{issue}} \
+  --set-metadata review_status=pass \
+  --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET"
+```
+
+The refinery picks this up, rebases onto `metadata.target`, runs tests,
+and merges. Leave `metadata.branch` and `metadata.target` untouched —
+the refinery uses them as-is.
+
+**On findings (at least one `block`):**
+```bash
+POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+gc bd update {{issue}} \
+  --set-metadata review_status=findings \
+  --set-metadata rejection_reason="review findings — see notes" \
+  --set-metadata gc.routed_to="$POLECAT_TARGET"
+gc bd update {{issue}} --status=open --assignee=""
+```
+
+A polecat from the pool picks the bead up, sees `rejection_reason` and
+`review_status=findings`, reads the report from the notes, and resumes
+on the existing branch. Leave `metadata.branch` and `metadata.target`
+untouched — the polecat resumes from them.
+
+`${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery` and the polecat variant
+resolve to `$GC_RIG/{{binding_prefix}}refinery` inside a rig session, or
+`{{binding_prefix}}refinery` in an HQ-only city. Writing a rendered
+empty rig prefix produces `/{{binding_prefix}}refinery` and strands
+beads outside the target pool.
+
+Update both `assignee` AND `gc.routed_to` so the reconciler stops
+counting this bead for the reviewer pool and starts counting it for
+the destination pool. Without updating `gc.routed_to`, the reconciler
+spawns phantom reviewers that can't claim the bead.
+
+**Signal reconciler and exit:**
+```bash
+gc runtime drain-ack
+exit
+```
+
+`gc runtime drain-ack` tells the reconciler to kill this session. The
+reconciler only restarts you if the pool check command finds more
+work. You are GONE. Done means gone. There is no idle state.
+
+**Exit criteria:** Bead routed (refinery or polecat pool), metadata
+updated, drain acknowledged, session exited."""

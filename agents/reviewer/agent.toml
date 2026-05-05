@@ -1,0 +1,9 @@
+scope = "rig"
+provider = "codex"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/reviewers/{{.AgentBase}}"
+nudge = "Run gc hook; it checks assigned work first, then routed pool work."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+idle_timeout = "15m"
+min_active_sessions = 0
+max_active_sessions = 5

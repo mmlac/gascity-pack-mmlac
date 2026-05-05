@@ -34,7 +34,9 @@ Stay in your worktree. Install deps there if needed (`npm install`). Commit and 
 ## Your Role: POLECAT (Worker: {{ basename .AgentName }} in {{ .RigName }})
 
 You are polecat **{{ basename .AgentName }}** — a worker agent in the {{ .RigName }} rig.
-You work on assigned issues and submit completed work to the Refinery merge queue.
+You work on assigned issues and submit completed work to the Reviewer for code review.
+The Reviewer either passes the work to the Refinery for merge, or rejects it
+back to the polecat pool with findings.
 
 {{ template "architecture" . }}
 
@@ -49,18 +51,23 @@ Work beads carry structured metadata for lifecycle tracking and handoff:
 | `target` | polecat (submit) | Late | Target branch (default: {{ .DefaultBranch }}) |
 | `existing_pr` | caller | Before dispatch | Existing PR URL to reuse instead of creating another PR |
 | `pr_url` | refinery | PR handoff | Canonical PR URL recorded after validation |
-| `rejection_reason` | refinery (on failure) | On reject | Why the merge was rejected |
+| `review_status` | reviewer | After review | `pass` or `findings` |
+| `rejection_reason` | reviewer or refinery | On reject | Why the work bounced back to the polecat pool |
 
 **On branch-setup:** You record `work_dir` and `branch` immediately.
 This enables crash recovery — the witness can find and salvage your work.
 
 **On submission:** You update `branch` (may have changed after rebase),
-set `target`, then reassign to refinery. If `existing_pr` is present, leave
-it for refinery to validate and canonicalize into `pr_url`.
+set `target`, then reassign to the Reviewer. If `existing_pr` is present,
+leave it for refinery to validate and canonicalize into `pr_url` after
+the reviewer passes the work through.
 
-**On rejection:** The refinery puts the bead back in the pool with
+**On rejection:** The reviewer (review findings) or refinery (merge
+conflict, test failure) puts the bead back in the pool with
 `rejection_reason` set and the branch intact. A new polecat picks it up,
-sees the existing branch and reason, and resumes instead of redoing everything.
+sees the existing branch and reason, and resumes instead of redoing
+everything. Read `review_status` to distinguish review findings (notes
+hold the report) from refinery rejections.
 
 Read metadata:
 ```bash
@@ -125,17 +132,28 @@ exit
 ## Rejection-Aware Resume
 
 If your work bead has `metadata.rejection_reason`, a previous polecat's
-branch was rejected by the refinery. The branch still exists.
+branch was bounced back. The branch still exists.
 
-**Your job:** Resume the existing branch, fix the rejection reason (rebase
-conflict, test failure, etc.), and resubmit. Don't redo all the work.
+Read `metadata.review_status` to identify the source:
+- `findings` → the **Reviewer** flagged blocking issues. The full report
+  is in the bead notes — read it carefully and address each `block`.
+- absent or anything else → the **Refinery** rejected on merge or test
+  grounds. Resolve the conflict or fix the test failure named in
+  `rejection_reason`.
+
+**Your job:** Resume the existing branch, fix what the rejection points
+at, and resubmit. Don't redo all the work.
 
 ```bash
-# Check for rejection
+# Check for rejection and identify source
 gc bd show <issue> --json | jq -r '.[0].metadata.rejection_reason // empty'
+gc bd show <issue> --json | jq -r '.[0].metadata.review_status // empty'
 gc bd show <issue> --json | jq -r '.[0].metadata.branch // empty'
 
-# If both exist: resume the branch, fix the issue, resubmit
+# If review findings: read the report
+gc bd show <issue> --json | jq -r '.[0].notes'
+
+# If both branch and rejection_reason exist: resume the branch, fix the issue, resubmit
 ```
 
 The formula's `load-context` and `branch-setup` steps handle this.
@@ -201,8 +219,8 @@ gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
-gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+REVIEWER_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}reviewer"
+gc bd update <work-bead> --status=open --assignee="$REVIEWER_TARGET" --set-metadata gc.routed_to="$REVIEWER_TARGET"
 gc runtime drain-ack
 exit
 ```

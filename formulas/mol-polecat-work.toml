@@ -2,26 +2,34 @@ description = """
 Polecat work lifecycle — feature-branch variant.
 
 Extends mol-polecat-base with feature-branch workspace setup and
-refinery-based submission. The polecat creates a feature branch,
-implements the work, then pushes and reassigns to the refinery for
-merge review.
+reviewer-based submission. The polecat creates a feature branch,
+implements the work, then pushes and reassigns to the Reviewer. The
+Reviewer either passes the bead through to the Refinery for merge,
+or rejects it back to the polecat pool with review findings.
 
 ## Polecat Contract (Self-Cleaning Model)
 
 1. Receive work (molecule poured with this formula, assigned to you)
 2. Follow steps in order (read descriptions, execute, move to next)
-3. Submit: push branch, set metadata on work bead, assign to refinery, exit
-4. You are GONE — Refinery merges, closes the bead
+3. Submit: push branch, set metadata on work bead, assign to reviewer, exit
+4. You are GONE — Reviewer judges, Refinery merges, the bead closes
 
-**No MR beads.** Work beads flow directly: pool → polecat → refinery → closed.
+**No MR beads.** Work beads flow directly:
+pool → polecat → reviewer → refinery → closed.
 The polecat sets `metadata.branch` and `metadata.target` on the work bead
-and reassigns it to the refinery. The refinery merges and closes.
+and reassigns it to the Reviewer. The Reviewer reads the diff, writes
+findings into the bead notes, and either reassigns to the Refinery
+(clean) or returns the bead to the polecat pool (block findings) with
+`rejection_reason` set.
 `{{base_branch}}` may come from the work bead's own `metadata.target` or
 be inherited from a parent convoy with `metadata.target` set.
 
 **Rejection-aware.** If the work bead has `metadata.branch` and
-`metadata.rejection_reason`, a previous attempt was rejected by the
-refinery. Resume the existing branch — don't redo all the work.
+`metadata.rejection_reason`, a previous attempt was rejected. Read
+`metadata.review_status` to tell what happened: `findings` means the
+Reviewer flagged issues (full report in bead notes), absent or
+something else means the Refinery rejected on merge/test grounds.
+Either way: resume the existing branch — don't redo all the work.
 
 ## Failure Modes
 
@@ -162,10 +170,11 @@ on the bead."""
 
 [[steps]]
 id = "submit-and-exit"
-title = "Submit work to refinery and exit"
+title = "Submit work to reviewer and exit"
 needs = ["self-review"]
 description = """
-Hand off your work and self-clean. You cease to exist after this step.
+Hand off your work to the Reviewer and self-clean. You cease to exist
+after this step.
 
 **1. Final clean-state verification (safeguard):**
 ```bash
@@ -187,7 +196,7 @@ git push origin HEAD
 ```bash
 BRANCH=$(git branch --show-current)
 git checkout --detach                 # Detach so we can delete the branch
-git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
+git branch -D "$BRANCH"              # Branch is pushed; reviewer fetches by name
 ```
 
 **4. Update metadata on the work bead:**
@@ -197,32 +206,38 @@ gc bd update {{issue}} \
   --notes "Implemented: <brief summary>"
 ```
 Branch was recorded in workspace-setup and is already in metadata.
-This adds the target for the refinery. If an existing pull request was
-provided by the caller, `metadata.existing_pr` is preserved for refinery
-validation. The refinery records canonical `pr_url` only after verifying
+This adds the target for the reviewer/refinery chain. If an existing
+pull request was provided by the caller, `metadata.existing_pr` is
+preserved for refinery validation after the reviewer passes the bead
+through. The refinery records canonical `pr_url` only after verifying
 the PR is open and matches the branch, base, and origin repository.
 
-**5. Reassign to refinery:**
+**5. Reassign to reviewer:**
 ```bash
-REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
-gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+REVIEWER_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}reviewer"
+gc bd update {{issue}} --status=open --assignee="$REVIEWER_TARGET" --set-metadata gc.routed_to="$REVIEWER_TARGET"
 ```
 
-`${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery` resolves to
-`$GC_RIG/{{binding_prefix}}refinery` when running inside a rig session,
-or `{{binding_prefix}}refinery` when running in an HQ-only city where
+`${GC_RIG:+$GC_RIG/}{{binding_prefix}}reviewer` resolves to
+`$GC_RIG/{{binding_prefix}}reviewer` when running inside a rig session,
+or `{{binding_prefix}}reviewer` when running in an HQ-only city where
 the workspace is the rig. Writing a rendered empty rig prefix produces
-`/{{binding_prefix}}refinery` and strands beads outside the refinery pool.
+`/{{binding_prefix}}reviewer` and strands beads outside the reviewer pool.
 
 Update both `assignee` AND `gc.routed_to` so the reconciler stops
 counting this bead for the polecat pool and starts counting it for
-the refinery pool. Without updating `gc.routed_to`, the reconciler
+the reviewer pool. Without updating `gc.routed_to`, the reconciler
 spawns phantom polecats that can't claim the bead.
 
-The refinery will pick this up, rebase onto {{base_branch}}, run tests,
-merge, and close the bead. If there's a conflict, the refinery puts the
-bead back in the pool with `rejection_reason` metadata — a new polecat
-picks it up and resumes from the existing branch.
+The reviewer will fetch your branch, diff it against {{base_branch}},
+review against the security/architecture/tests/dead-code/edge-case
+focus areas, and either:
+
+- **Pass** — reassign the bead to the Refinery, which merges and closes it.
+- **Reject** — return the bead to the polecat pool with `metadata.review_status=findings`,
+  `metadata.rejection_reason` set, and the full report in the bead notes.
+  A new polecat picks it up, reads the report, and resumes on the
+  existing branch.
 
 **6. Signal reconciler and exit.**
 ```bash
@@ -234,4 +249,4 @@ exit
 reconciler only restarts you if the pool check command finds more work.
 You are GONE. Done means gone. There is no idle state.
 
-**Exit criteria:** Branch pushed, metadata set, bead reassigned, drain acknowledged, session exited."""
+**Exit criteria:** Branch pushed, metadata set, bead reassigned to reviewer, drain acknowledged, session exited."""
