@@ -9,6 +9,12 @@ gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
 # ── Mouse support (scrolling, pane select, drag-to-resize) ────────────
 gcmux set -g mouse on
 
+# Wheel-up always enters copy-mode, even when the foreground app captures
+# mouse events (Claude Code, etc.). Without this, scrolling in those panes
+# is forwarded to the app and never reaches tmux's scrollback.
+gcmux bind-key -T root WheelUpPane   if -F "#{pane_in_mode}" "send -M" "copy-mode -e"
+gcmux bind-key -T root WheelDownPane if -F "#{pane_in_mode}" "send -M" "send -M"
+
 # ── Navigation bindings (prefix table) ────────────────────────────────
 "$CONFIGDIR"/assets/scripts/bind-key.sh n "run-shell '$CONFIGDIR/assets/scripts/cycle.sh next #{session_name} #{client_tty}'"
 "$CONFIGDIR"/assets/scripts/bind-key.sh p "run-shell '$CONFIGDIR/assets/scripts/cycle.sh prev #{session_name} #{client_tty}'"
