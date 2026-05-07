@@ -177,11 +177,17 @@ append_exclude "__pycache__/"
 # convention. Using `<tool>/*` instead of `<tool>/` is what lets the
 # `!<tool>/skills/` negation re-include — a directory exclude would skip
 # recursion entirely.
+#
+# After re-including skills/, re-exclude `core.gc-*` underneath: those
+# are Gas City controller-installed skills (mail, dispatch, dashboard,
+# rigs, work, etc.) that get auto-stamped into every worktree. They're
+# machinery, not project content; they should never be committed.
 for tool in .claude .codex .gemini .opencode; do
     append_exclude "$tool/*"
     append_exclude "!$tool/skills/"
     append_exclude "!$tool/commands/"
     append_exclude "!$tool/agents/"
+    append_exclude "$tool/skills/core.gc-*"
 done
 
 append_exclude ".github/hooks/"
