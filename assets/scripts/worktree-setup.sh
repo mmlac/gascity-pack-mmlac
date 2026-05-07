@@ -169,10 +169,21 @@ append_exclude ".runtime/"
 append_exclude ".logs/"
 append_exclude "worktrees/"
 append_exclude "__pycache__/"
-append_exclude ".claude/"
-append_exclude ".codex/"
-append_exclude ".gemini/"
-append_exclude ".opencode/"
+
+# AI-tool config dirs: blanket-exclude per-session runtime cruft
+# (settings.json, project history, caches) but allow-list the canonical
+# committed-content subdirs (skills/, commands/, agents/) that Claude
+# Code, Codex, Gemini, and OpenCode all use as the shared-content
+# convention. Using `<tool>/*` instead of `<tool>/` is what lets the
+# `!<tool>/skills/` negation re-include — a directory exclude would skip
+# recursion entirely.
+for tool in .claude .codex .gemini .opencode; do
+    append_exclude "$tool/*"
+    append_exclude "!$tool/skills/"
+    append_exclude "!$tool/commands/"
+    append_exclude "!$tool/agents/"
+done
+
 append_exclude ".github/hooks/"
 append_exclude ".github/copilot-instructions.md"
 append_exclude "state.json"
