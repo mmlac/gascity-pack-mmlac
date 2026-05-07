@@ -7,3 +7,6 @@ pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.Wo
 idle_timeout = "15m"
 min_active_sessions = 0
 max_active_sessions = 5
+
+[option_defaults]
+effort = "high"

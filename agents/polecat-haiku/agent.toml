@@ -1,0 +1,30 @@
+# polecat-haiku — Claude Haiku 4.5 variant of the polecat pool.
+#
+# Same lifecycle as the bare `polecat` agent (mol-polecat-work), pinned to
+# haiku. Use for trivial/mechanical work: typo fixes, doc updates, small
+# config tweaks, anything where speed and cost matter more than depth.
+# Cap is high because haiku is cheap.
+#
+# Worktree path includes {{.Agent}} so polecat-opus/furiosa, polecat-sonnet/furiosa,
+# and polecat/furiosa coexist on disk without collision when the namepool repeats.
+#
+# Routing in:  gc sling <rig>/polecat-haiku <bead>
+# Routing out (on review/refinery rejection): preserved via the `worker_pool`
+# metadata stamp set by mol-polecat-work stamp-worker-pool.
+
+scope = "rig"
+provider = "claude"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.Agent}}/{{.AgentBase}}"
+prompt_template = "/gc/packs/mmlac/shared/polecat/prompt.template.md"
+namepool = "/gc/packs/mmlac/shared/polecat/namepool.txt"
+nudge = "Run gc hook; it checks assigned work first, then routed pool work."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 8
+default_sling_formula = "mol-polecat-work"
+
+[option_defaults]
+model = "haiku"
+effort = "max"

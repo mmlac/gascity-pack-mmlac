@@ -25,7 +25,9 @@ The reviewer reads `metadata.branch` and `metadata.target` set by the
 polecat. On pass, sets `metadata.review_status=pass` and reassigns to
 `{{binding_prefix}}refinery`. On findings, sets
 `metadata.review_status=findings`, `metadata.rejection_reason`, routes
-back to `{{binding_prefix}}polecat`, and clears the assignee.
+back to the pool recorded in `metadata.worker_pool` (or
+`{{binding_prefix}}polecat-sonnet` if the stamp is missing), and clears
+the assignee.
 
 ## Variables
 
@@ -303,7 +305,14 @@ the refinery uses them as-is.
 
 **On findings (at least one `block`):**
 ```bash
-POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
+# Honor the pool the work originally came from (set by mol-polecat-work
+# stamp-worker-pool on first claim). Falls back to polecat-sonnet (the
+# default-tier variant) for beads that lack the stamp — e.g. manual
+# slings or replayed wisps that bypassed mol-polecat-work.
+POLECAT_TARGET=$(bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
+if [ -z "$POLECAT_TARGET" ]; then
+    POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat-sonnet"
+fi
 gc bd update {{issue}} \
   --set-metadata review_status=findings \
   --set-metadata rejection_reason="review findings — see notes" \
@@ -315,6 +324,11 @@ A polecat from the pool picks the bead up, sees `rejection_reason` and
 `review_status=findings`, reads the report from the notes, and resumes
 on the existing branch. Leave `metadata.branch` and `metadata.target`
 untouched — the polecat resumes from them.
+
+If `metadata.worker_pool` is set (e.g., `automatonai/polecat-opus`), the
+bead bounces back to that specific variant pool, preserving the
+model-tier choice from the original sling. If unset, it falls back to
+the legacy generic polecat pool.
 
 `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery` and the polecat variant
 resolve to `$GC_RIG/{{binding_prefix}}refinery` inside a rig session, or

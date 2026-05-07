@@ -41,12 +41,50 @@ Either way: resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 9
+version = 10
+
+[[steps]]
+id = "stamp-worker-pool"
+title = "Record original pool target for variant-aware rejection routing"
+needs = ["load-context"]
+description = """
+Capture which polecat pool routed this bead to us, so reviewer/refinery
+can bounce the bead back to the SAME pool on rejection — preserving the
+model-tier choice (opus/sonnet/haiku) that the slinger made.
+
+Idempotent: only stamps if `worker_pool` is unset. Safe to re-run after
+rejection-resume (the value persists across handoffs).
+
+**Background.** `metadata.gc.routed_to` carries the current routing
+target — when the Mayor slings to `automatonai/polecat-opus`, that's
+what's stamped there. But once we hand off to the reviewer, we
+overwrite `gc.routed_to` with the reviewer's qualified name, so the
+original opus-pool identity is lost. We mirror it into `worker_pool`
+now, before that overwrite, so it survives the round-trip.
+
+**Stamp:**
+```bash
+EXISTING_POOL=$(bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
+if [ -z "$EXISTING_POOL" ]; then
+    ROUTED=$(bd show {{issue}} --json | jq -r '.[0].metadata["gc.routed_to"] // empty')
+    if [ -n "$ROUTED" ]; then
+        bd update {{issue}} --set-metadata worker_pool="$ROUTED"
+    fi
+fi
+```
+
+If `gc.routed_to` is missing too (assignment-only path, no pool route),
+we skip — the rejection target then falls back to the formula default
+`<rig>/<binding_prefix>polecat` in mol-reviewer-work and
+mol-refinery-patrol, preserving legacy behavior.
+
+**Exit criteria:** `metadata.worker_pool` reflects the original pool
+route (or remains unset for legacy assignment-only beads)."""
 
 [[steps]]
 id = "workspace-setup"
 title = "Set up worktree and feature branch"
-needs = ["load-context"]
+needs = ["stamp-worker-pool"]
 description = """
 Ensure you have an isolated git worktree and a clean feature branch.
 Every check is idempotent — safe to re-run after crash/restart.
@@ -152,6 +190,26 @@ Recording the branch early means:
 - Witness can find and salvage your work if you crash
 - Rejection-aware resume knows which branch to check out
 - The submit step updates the metadata (branch may change after rebase)
+
+**3a. Sync `metadata.branch` to the actual current branch.**
+
+The "If branch exists in metadata" path above does NOT update
+`metadata.branch` (it assumed authoritative). The "If no branch" path
+above only sets the formula's default `polecat/{{issue}}`. In both cases,
+the polecat may have ended up on a different branch — for example when a
+later polecat picks up a bead whose `metadata.branch` was set by an
+earlier polecat working in a different worktree, or when the agent uses
+its own per-polecat branch convention rather than the formula's default.
+Without this sync, Reviewer and Refinery fetch the stale branch from
+metadata and either review nothing (already-merged ancestor) or review
+the wrong commits.
+
+Always overwrite `metadata.branch` with the polecat's actual current
+branch. Idempotent — no-op when metadata is already correct.
+```bash
+CURRENT_BRANCH=$(git branch --show-current)
+gc bd update {{issue}} --set-metadata branch="$CURRENT_BRANCH"
+```
 
 **4. Ensure clean working state:**
 ```bash
