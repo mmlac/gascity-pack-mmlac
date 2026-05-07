@@ -23,8 +23,9 @@ monitors the WORK layer:
 1. **Orphaned bead recovery** — beads assigned to agents that won't spawn
    (pool max changed, agent removed from config). This is the core job.
 2. **Refinery queue health** — work beads assigned to refinery, staleness.
-3. **Polecat health** — detect stuck polecats, file warrants for dog pool.
-4. **Help mail** — triage HELP/escalation requests from polecats.
+3. **Reviewer queue health** — work beads assigned to reviewer-N, staleness.
+4. **Polecat health** — detect stuck polecats, file warrants for dog pool.
+5. **Help mail** — triage HELP/escalation requests from polecats.
 
 Gate checks and convoy/swarm completion are town-wide concerns handled by
 the deacon, not the per-rig witness.
@@ -55,7 +56,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 8
+version = 9
 
 [vars]
 [vars.event_timeout]
@@ -360,47 +361,155 @@ id = "check-refinery"
 title = "Check refinery queue health"
 needs = ["recover-orphaned-beads"]
 description = """
-Ensure the refinery is processing work and the queue is healthy.
+Detect refineries that have work queued but aren't draining it.
 
-**Step 1: Check work beads assigned to refinery:**
+**This step is concrete, not judgment.** Run the bash. If a bead matches
+the thresholds, take the action. The previous version of this step left
+"is it stale?" as judgment and got skipped under context pressure —
+which is exactly how a wedged-thinking refinery slips by.
+
+**Resolve your rig once at the top of the step:**
 ```bash
-gc bd list --assignee=<rig>/refinery --status=open --json
+RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+NOW_EPOCH=$(date +%s)
+NOW_RFC3339=$(date -u +%FT%TZ)
 ```
 
-These are work beads with `metadata.branch` and `metadata.target` that
-polecats have submitted for merging. Look for:
-
-- **Stale beads**: Assigned to refinery but old `UpdatedAt`. The refinery
-  may be stuck or the bead may have been missed.
-- **Queue depth**: Many beads waiting may indicate the refinery is
-  overwhelmed or down.
-- **Empty queue**: No work assigned — refinery is idle, which is fine.
-
-**Step 2: Assess refinery wisp freshness:**
-
-Check when the refinery last completed a patrol cycle by looking at
-recent burned wisps. If the refinery has work assigned but its last
-wisp is stale, the refinery may be stuck.
-
-**Step 3: Nudge if needed:**
+**Step 1: List work beads queued at the refinery:**
 ```bash
-gc session nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
+RF_QUEUE=$(gc bd list --assignee="$RIG/refinery" --status=open --json --limit=0)
 ```
 
-**Step 4: Escalate if needed:**
+The refinery's queue is OPEN beads (the deliberate "queued, awaiting
+pickup" state). `in_progress` beads are the refinery's CURRENT pick;
+they're owned by the refinery's polling loop and not our concern here.
+
+**Step 2: Compute age and apply thresholds.**
+
+For each non-molecule bead in `$RF_QUEUE`, compute its age in minutes
+from `updated_at`, then route by tier:
+
 ```bash
-gc mail send mayor/ -s "QUEUE_HEALTH: <summary>" \
-  -m "Work bead IDs: <ids>
-Observation: <what you found>
-Recommendation: <what should happen>"
+echo "$RF_QUEUE" | jq -c --argjson now "$NOW_EPOCH" '
+  .[] | select(.issue_type != "molecule")
+      | {id, updated_at, review_status: (.metadata.review_status // ""),
+         prior_nudge: (.metadata."witness.refinery_nudged_at" // ""),
+         age_min: (((. | .updated_at | fromdateiso8601) - $now) / -60 | floor)}' \
+| while read -r bead; do
+    ID=$(echo "$bead" | jq -r '.id')
+    AGE=$(echo "$bead" | jq -r '.age_min')
+    REVIEW=$(echo "$bead" | jq -r '.review_status')
+    PRIOR=$(echo "$bead" | jq -r '.prior_nudge')
+
+    # Tier-eligibility:
+    #   review_status=pass AND age >= 10  → eligible (refinery should merge fast)
+    #   any              AND age >= 30  → eligible (bigger threshold for non-pass)
+    eligible=false
+    if [ "$REVIEW" = "pass" ] && [ "$AGE" -ge 10 ]; then eligible=true; fi
+    if [ "$AGE" -ge 30 ]; then eligible=true; fi
+    [ "$eligible" = false ] && continue
+
+    if [ -z "$PRIOR" ]; then
+      # Tier 1 — first observation: nudge and stamp.
+      gc session nudge "$RIG/refinery" \
+        "Bead $ID has been queued ${AGE}m (review_status=$REVIEW). Process the merge queue."
+      gc bd update "$ID" --set-metadata "witness.refinery_nudged_at=$NOW_RFC3339"
+      echo "WITNESS: tier1 nudge for $ID (age ${AGE}m, review=$REVIEW)"
+    else
+      # Tier 2 — already nudged, still stale. Escalate.
+      gc mail send mayor/ \
+        -s "REFINERY_STUCK: $ID still queued ${AGE}m after nudge" \
+        -m "Bead $ID assigned to $RIG/refinery, review_status=$REVIEW, age ${AGE}m.
+Prior nudge at $PRIOR. Filing dog warrant. Recommend manual reset of refinery session if pattern repeats."
+      gc bd create --type=warrant \
+        --title="Stuck: $RIG/refinery (queue blocked on $ID)" \
+        --metadata "{\"target\":\"$RIG/refinery\",\"reason\":\"Refinery did not act on nudge for $ID; age ${AGE}m, review_status=$REVIEW\",\"requester\":\"witness\"}" \
+        --label=pool:dog
+      echo "WITNESS: tier2 escalation for $ID (age ${AGE}m, review=$REVIEW)"
+    fi
+  done
 ```
 
-Close this step after assessment."""
+**Important**:
+- The two-tier ladder is intentional. Tier 1 is cheap and corrects
+  transient hiccups. Tier 2 only fires when a tier 1 nudge already
+  ran and didn't help — that's the signal to escalate.
+- The metadata stamp `witness.refinery_nudged_at` makes the ladder
+  resumable across witness restarts. Don't clear it; the refinery's
+  successful merge will close the bead and the metadata goes with it.
+- Threshold values (10/30 min) are intentionally hardcoded for now.
+  Promote to formula `[vars]` only when there's a concrete reason to
+  vary them per rig.
+
+**Exit criteria:** All queued refinery beads classified, actions
+emitted for any that crossed thresholds. Empty queue is a normal,
+quiet exit."""
+
+[[steps]]
+id = "check-reviewer"
+title = "Check reviewer queue health"
+needs = ["check-refinery"]
+description = """
+Same shape as `check-refinery` but for the reviewer pool. Reviewers are
+multiple instances (`reviewer-1` … `reviewer-N`); the assignee will be
+`<rig>/reviewer-<n>`.
+
+**Resolve rig and time:**
+```bash
+RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+NOW_EPOCH=$(date +%s)
+NOW_RFC3339=$(date -u +%FT%TZ)
+```
+
+**Step 1: List work beads queued at any reviewer in this rig:**
+```bash
+REV_QUEUE=$(gc bd list --status=open --json --limit=0 \
+  | jq --arg rig "$RIG" '[.[] | select(.assignee // "" | startswith($rig + "/reviewer"))]')
+```
+
+**Step 2: Apply staleness threshold and tier ladder:**
+
+There is no `review_status=pass` fast path here (the reviewer is what
+SETS that field). Use a single threshold of 30 minutes.
+
+```bash
+echo "$REV_QUEUE" | jq -c --argjson now "$NOW_EPOCH" '
+  .[] | select(.issue_type != "molecule")
+      | {id, assignee, updated_at,
+         prior_nudge: (.metadata."witness.reviewer_nudged_at" // ""),
+         age_min: (((. | .updated_at | fromdateiso8601) - $now) / -60 | floor)}
+      | select(.age_min >= 30)' \
+| while read -r bead; do
+    ID=$(echo "$bead" | jq -r '.id')
+    AGE=$(echo "$bead" | jq -r '.age_min')
+    ASSIGNEE=$(echo "$bead" | jq -r '.assignee')
+    PRIOR=$(echo "$bead" | jq -r '.prior_nudge')
+
+    if [ -z "$PRIOR" ]; then
+      gc session nudge "$ASSIGNEE" \
+        "Bead $ID has been queued ${AGE}m for review. Pick it up or hand back."
+      gc bd update "$ID" --set-metadata "witness.reviewer_nudged_at=$NOW_RFC3339"
+      echo "WITNESS: tier1 reviewer nudge for $ID → $ASSIGNEE (age ${AGE}m)"
+    else
+      gc mail send mayor/ \
+        -s "REVIEWER_STUCK: $ID still queued ${AGE}m after nudge" \
+        -m "Bead $ID assigned to $ASSIGNEE, age ${AGE}m. Prior nudge at $PRIOR. Filing dog warrant."
+      gc bd create --type=warrant \
+        --title="Stuck: $ASSIGNEE (queue blocked on $ID)" \
+        --metadata "{\"target\":\"$ASSIGNEE\",\"reason\":\"Reviewer did not act on nudge for $ID; age ${AGE}m\",\"requester\":\"witness\"}" \
+        --label=pool:dog
+      echo "WITNESS: tier2 reviewer escalation for $ID → $ASSIGNEE (age ${AGE}m)"
+    fi
+  done
+```
+
+**Exit criteria:** All queued reviewer beads classified, actions
+emitted for any over threshold. Empty queue is a normal exit."""
 
 [[steps]]
 id = "check-polecat-health"
 title = "Check polecat work progress"
-needs = ["check-refinery"]
+needs = ["check-reviewer"]
 description = """
 Detect polecats that are alive but not making progress on their work.
 
