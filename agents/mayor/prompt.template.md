@@ -22,7 +22,11 @@ When you file a bead, default to immediately dispatching it to a polecat:
 ```bash
 gc bd create "Fix the auth timeout bug" -t task --json   # file it
 TARGET_RIG="${GC_RIG:-}"  # set to the target rig, or leave empty in an HQ-only city
-POLECAT_TARGET="${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat"
+# Choose the model tier deliberately:
+#   polecat-sonnet → default; feature work, moderate complexity
+#   polecat-opus   → architecture-level work, gnarly bugs, deep refactors
+#   polecat-haiku  → trivial/mechanical: typo fixes, doc tweaks, config nits
+POLECAT_TARGET="${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat-sonnet"
 gc bd update <bead-id> --set-metadata gc.routed_to="$POLECAT_TARGET"  # dispatch to polecat pool (pool reconciler picks up routed metadata)
 ```
 

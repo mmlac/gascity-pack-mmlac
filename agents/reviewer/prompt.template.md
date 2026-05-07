@@ -256,7 +256,14 @@ exit
 
 **On findings (`block` severity exists):**
 ```bash
-POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat"
+# Honor the pool the work originally came from (set by mol-polecat-work
+# stamp-worker-pool on first claim). Falls back to polecat-sonnet (the
+# default-tier variant) for beads that lack the stamp — e.g. manual
+# slings or replayed wisps that bypassed mol-polecat-work.
+POLECAT_TARGET=$(gc bd show <work-bead> --json | jq -r '.[0].metadata.worker_pool // empty')
+if [ -z "$POLECAT_TARGET" ]; then
+    POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat-sonnet"
+fi
 gc bd update <work-bead> \
   --set-metadata review_status=findings \
   --set-metadata rejection_reason="review findings — see notes" \

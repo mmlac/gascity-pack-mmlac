@@ -106,8 +106,10 @@ gc mail inbox
 
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
 checks assigned work first (session bead ID, runtime session name, then
-alias) and only falls through to unassigned pool work routed to
-`${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
+alias) and only falls through to unassigned pool work routed to your
+specific variant pool — `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat-sonnet`,
+`...polecat-opus`, or `...polecat-haiku` depending on which variant
+config spawned this session.
 
 **Hook/work query -> Read formula steps -> Follow in order -> done sequence.**
 
