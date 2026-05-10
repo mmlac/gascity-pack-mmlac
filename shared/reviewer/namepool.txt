@@ -1,0 +1,7 @@
+# Literary critics — themed pool names for the reviewer pool.
+# Mirrors the polecat pool's namepool pattern (see ../polecat/namepool.txt).
+kael
+trilling
+sontag
+barthes
+eagleton
