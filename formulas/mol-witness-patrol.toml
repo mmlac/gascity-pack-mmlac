@@ -56,7 +56,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 9
+version = 10
 
 [vars]
 [vars.event_timeout]
@@ -562,9 +562,56 @@ polecats, systemic issue).
 filed for stuck agents. Or no stuck polecats found."""
 
 [[steps]]
+id = "patrol-summary"
+title = "Mandatory patrol summary (do not skip)"
+needs = ["check-polecat-health"]
+description = """
+This step exists because the witness has been observed collapsing the
+queue-health checks into a single combined query, skipping `check-refinery`
+or `check-reviewer` entirely. The summary forces fresh queries each cycle
+and emits a single grep-able line so a missed check becomes visible.
+
+**Run all four queries fresh — do not reuse counts from earlier steps.**
+Earlier steps run in separate shells and their variables are not in scope
+here; if a step was skipped, you would have no count to copy anyway.
+
+```bash
+RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+
+ALL_OPEN=$(gc bd list --status=open --json --limit=0)
+IN_PROGRESS=$(gc bd list --status=in_progress --json --limit=0)
+
+REFINERY_COUNT=$(echo "$ALL_OPEN" | jq --arg rig "$RIG" '
+  [.[] | select(.assignee == "\($rig)/refinery")] | length')
+
+REVIEWER_COUNT=$(echo "$ALL_OPEN" | jq --arg rig "$RIG" '
+  [.[] | select(.assignee // "" | startswith("\($rig)/reviewer"))] | length')
+
+POLECAT_IN_PROGRESS=$(echo "$IN_PROGRESS" | jq '
+  [.[] | select(.assignee // "" | test("polecat|polecat-"))] | length')
+
+ASSIGNED_OPEN=$(echo "$ALL_OPEN" | jq '
+  [.[] | select((.assignee // "") != "")] | length')
+
+echo "WITNESS_PATROL_SUMMARY rig=$RIG refinery=$REFINERY_COUNT reviewer=$REVIEWER_COUNT polecat_in_progress=$POLECAT_IN_PROGRESS assigned_open=$ASSIGNED_OPEN"
+```
+
+**Self-check (don't skip):**
+
+- If `REFINERY_COUNT > 0` and `check-refinery` did not nudge / escalate in
+  this cycle, that step was skipped — return to `check-refinery` before
+  continuing.
+- If `REVIEWER_COUNT > 0` and `check-reviewer` did not nudge / escalate
+  in this cycle, that step was skipped — return to `check-reviewer`.
+
+**Exit criteria:** Exactly one `WITNESS_PATROL_SUMMARY` line emitted with
+all five counts present. No iteration may reach `next-iteration` without
+this line in the cycle's output."""
+
+[[steps]]
 id = "next-iteration"
 title = "Pour next iteration and loop"
-needs = ["check-polecat-health"]
+needs = ["patrol-summary"]
 description = """
 **Config: event_timeout = {{event_timeout}}**
 
