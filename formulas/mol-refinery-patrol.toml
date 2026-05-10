@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 3
+version = 4
 contract = "graph.v2"
 
 [vars]
@@ -122,15 +122,47 @@ gc bd show $WORK --json | jq '.[0].metadata'
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
 
-If NO work found: wait for assignment:
+If NO work found: enter a **poll-then-watch loop**. The watch is a
+wake-up signal — never a data source. The `gc bd list` re-poll is the
+only authoritative answer to "is there work?".
+
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
+TIMEOUT={{event_timeout}}
+while [ -z "$WORK" ]; do
+  SEQ=$(gc events --seq)
+  # Filter to events that touch refinery work; drops infra noise
+  # (gate-sweep, orphan-sweep, etc.) so the wake rate matches our cadence.
+  gc events --watch --type=bead.updated --after=$SEQ \
+    --payload-match "bead.assignee=$GC_AGENT" \
+    --timeout ${TIMEOUT}s >/dev/null 2>&1 || true
+  # Event arrived OR timeout — always re-poll, never trust event content.
+  WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
+    --exclude-type=epic --exclude-type=molecule --limit=1 --json | jq -r '.[0].id // empty')
+  # Exponential backoff on timeout: helps quiet rigs avoid hot-looping.
+  if [ -z "$WORK" ]; then
+    TIMEOUT=$(( TIMEOUT * 2 ))
+    [ $TIMEOUT -gt 300 ] && TIMEOUT=300
+  fi
+done
 ```
 
-On event: re-check for assigned work. If found, close this step.
-On timeout: re-check anyway, then wait again with doubled timeout (cap 300s).
+Why the re-poll matters: a previous bug pattern (observed 2026-05-10) had
+the refinery interpreting event *content* and dismissing the wake-up when
+the payload didn't superficially match its work. A bead reassignment event
+slipped through and `au-quwk2` sat unprocessed for 46+ minutes. Always
+re-poll on every wake; the bd list cannot be missed by a cursor race.
+
+Why the payload filter: the watch was waking the refinery on every
+`order:gate-sweep` / `order:orphan-sweep` infra bead, which floods the
+event stream and burns context. Filtering to events touching the
+refinery's own assignee drops ~95% of wake-ups without affecting
+correctness — the re-poll on the surviving wakes still catches everything
+the filter accidentally drops.
+
+If `--payload-match bead.assignee=$GC_AGENT` returns zero matches against
+real events (the payload schema differs from expectation), fall back to
+unfiltered `--type=bead.updated`. The re-poll keeps correctness; the
+filter is purely optimization.
 
 **Do not close this step until you have a work bead with branch metadata.**"""
 
