@@ -273,7 +273,7 @@ the PR is open and matches the branch, base, and origin repository.
 **5. Reassign to reviewer:**
 ```bash
 REVIEWER_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}reviewer"
-gc bd update {{issue}} --status=open --assignee="$REVIEWER_TARGET" --set-metadata gc.routed_to="$REVIEWER_TARGET"
+gc bd update {{issue}} --status=open --assignee="" --set-metadata gc.routed_to="$REVIEWER_TARGET"
 ```
 
 `${GC_RIG:+$GC_RIG/}{{binding_prefix}}reviewer` resolves to
@@ -282,10 +282,13 @@ or `{{binding_prefix}}reviewer` when running in an HQ-only city where
 the workspace is the rig. Writing a rendered empty rig prefix produces
 `/{{binding_prefix}}reviewer` and strands beads outside the reviewer pool.
 
-Update both `assignee` AND `gc.routed_to` so the reconciler stops
-counting this bead for the polecat pool and starts counting it for
-the reviewer pool. Without updating `gc.routed_to`, the reconciler
-spawns phantom polecats that can't claim the bead.
+Clear `assignee` (`--assignee=""`) and set `gc.routed_to=<pool>`. The
+reviewer hook's tier-3 query is `bd ready --metadata-field
+gc.routed_to=<pool> --unassigned` — setting `assignee=<pool template>`
+makes the bead invisible to that query (pool names aren't session
+identifiers, and `--unassigned` requires a null assignee). The
+reviewer atomically claims via `bd update --claim`, which then fills
+in the session-identifier assignee and bumps status to in_progress.
 
 The reviewer will fetch your branch, diff it against {{base_branch}},
 review against the security/architecture/tests/dead-code/edge-case
