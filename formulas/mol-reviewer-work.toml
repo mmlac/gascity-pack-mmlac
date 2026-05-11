@@ -296,8 +296,15 @@ REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
 gc bd update {{issue}} \
   --set-metadata review_status=pass \
   --set-metadata gc.routed_to="$REFINERY_TARGET"
-gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET"
+gc bd update {{issue}} --status=open --assignee=""
 ```
+
+Hand off as **unassigned + routed**, not assignee=pool. The refinery
+hook's tier-3 query is `bd ready --metadata-field gc.routed_to=<pool>
+--unassigned`, AND the supervisor's `defaultPoolDemand` pass skips
+beads with `Assignee != ""`. Setting `assignee=<pool template>` makes
+the bead invisible to both layers and strands it. The reject path
+below already gets this right.
 
 The refinery picks this up, rebases onto `metadata.target`, runs tests,
 and merges. Leave `metadata.branch` and `metadata.target` untouched —
