@@ -222,7 +222,7 @@ gc bd update <work-bead> \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
 REVIEWER_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}reviewer"
-gc bd update <work-bead> --status=open --assignee="$REVIEWER_TARGET" --set-metadata gc.routed_to="$REVIEWER_TARGET"
+gc bd update <work-bead> --status=open --assignee="" --set-metadata gc.routed_to="$REVIEWER_TARGET"
 gc runtime drain-ack
 exit
 ```

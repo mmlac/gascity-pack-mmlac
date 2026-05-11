@@ -249,18 +249,21 @@ REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
 gc bd update <work-bead> \
   --set-metadata review_status=pass \
   --set-metadata gc.routed_to="$REFINERY_TARGET"
-gc bd update <work-bead> --status=open --assignee=""
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET"
 gc runtime drain-ack
 exit
 ```
 
-Hand off as **unassigned + routed**, not assignee=pool. The refinery
-hook's tier-3 query is `bd ready --metadata-field gc.routed_to=<pool>
---unassigned`, AND the supervisor's `defaultPoolDemand` pass skips
-beads with `Assignee != ""`. Setting `assignee=<pool template>` makes
-the bead invisible to both layers (pool names aren't session
-identifiers, and `--unassigned` requires a null assignee). The reject
-path below already gets this right.
+**Refinery is a single named agent (max_active_sessions=1), not a
+pool.** Set `assignee=<refinery name>` here. The refinery's event
+watch listens for direct assignments to its session identity, and
+since the agent name resolves 1:1 to that session, both the
+supervisor's Path 1 demand and the agent's hook tier-2 query match.
+
+This is the OPPOSITE of polecat→reviewer (pool) and the on-findings
+reject path below: those handoffs MUST clear the assignee because
+pool template names don't resolve to a session identity. The
+asymmetry is load-bearing.
 
 **On findings (`block` severity exists):**
 ```bash
