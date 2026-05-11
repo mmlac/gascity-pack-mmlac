@@ -249,16 +249,10 @@ REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
 gc bd update <work-bead> \
   --set-metadata review_status=pass \
   --set-metadata gc.routed_to="$REFINERY_TARGET"
-gc bd update <work-bead> --status=open --assignee=""
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET"
 gc runtime drain-ack
 exit
 ```
-
-Hand off as **unassigned + routed**, not assignee=pool. The refinery
-hook's tier-3 query is `bd ready --metadata-field gc.routed_to=<pool>
---unassigned`; setting `assignee=<pool template>` makes the bead
-invisible (pool names aren't session identifiers, and `--unassigned`
-requires a null assignee). The reject path below already gets this right.
 
 **On findings (`block` severity exists):**
 ```bash
