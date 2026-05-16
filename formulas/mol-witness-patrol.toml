@@ -565,7 +565,7 @@ filed for stuck agents. Or no stuck polecats found."""
 id = "patrol-summary"
 title = "Mandatory patrol summary (do not skip)"
 needs = ["check-polecat-health"]
-description = """
+description = '''
 This step exists because the witness has been observed collapsing the
 queue-health checks into a single combined query, skipping `check-refinery`
 or `check-reviewer` entirely. The summary forces fresh queries each cycle
@@ -606,7 +606,7 @@ echo "WITNESS_PATROL_SUMMARY rig=$RIG refinery=$REFINERY_COUNT reviewer=$REVIEWE
 
 **Exit criteria:** Exactly one `WITNESS_PATROL_SUMMARY` line emitted with
 all five counts present. No iteration may reach `next-iteration` without
-this line in the cycle's output."""
+this line in the cycle's output.'''
 
 [[steps]]
 id = "next-iteration"
