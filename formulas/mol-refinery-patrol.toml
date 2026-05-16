@@ -477,7 +477,7 @@ ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.[0].title')
 PR_BODY=$(cat <<EOF
 ## Summary
 
-Automated pull request published by Gastown Refinery.
+Automated pull request published by mmlac Refinery.
 
 - Issue: $WORK
 - Branch: $BRANCH
@@ -588,13 +588,13 @@ Do NOT delete `$BRANCH` in mr mode — GitHub pull requests need the source bran
 
 **If MERGE_STRATEGY = "local":**
 
-STOP. Local-only merge handoff is not implemented in the Gastown example pack.
+STOP. Local-only merge handoff is not implemented in the mmlac pack.
 Leave the work bead assigned to refinery and escalate to mayor for manual handling:
 ```bash
 gc mail send mayor/ -s "ESCALATION: unsupported merge_strategy=local" -m "Work bead: $WORK
 Branch: $BRANCH
 Target: $TARGET
-The Gastown example refinery supports direct and mr/pr merge strategies only."
+The mmlac refinery supports direct and mr/pr merge strategies only."
 ```
 Do NOT close the bead, delete the branch, or burn the wisp until a human decides how to proceed.
 

@@ -1,6 +1,6 @@
 #!/bin/sh
-# gastown status — show orchestration overview.
-# Invoked as: gc gastown status [args...]
+# gascity status — show orchestration overview.
+# Invoked as: gc gascity status [args...]
 #
 # Environment (set by gc):
 #   GC_CITY_PATH   — absolute city root
@@ -10,7 +10,7 @@
 
 set -e
 
-echo "Gastown status for ${GC_CITY_NAME:-unknown}"
+echo "Gascity status for ${GC_CITY_NAME:-unknown}"
 echo "City: ${GC_CITY_PATH:-unknown}"
 echo ""
 

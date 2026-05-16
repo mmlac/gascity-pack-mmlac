@@ -68,7 +68,7 @@ over this workspace.
 ## Cross-Rig Worktrees
 
 When you need to work on a different rig (e.g., fix a beads bug while assigned
-to gastown), you can create a worktree in the target rig:
+to gascity), you can create a worktree in the target rig:
 
 ```bash
 # Create a worktree in another rig (look up the target rig's root first)
@@ -86,7 +86,7 @@ git worktree remove {{ .CityRoot }}/.gc/worktrees/$TARGET_RIG/crew/{{ basename .
 **Directory structure:**
 ```
 {{ .CityRoot }}/.gc/worktrees/beads/crew/{{ basename .AgentName }}-from-{{ .RigName }}   # You (from {{ .RigName }}) working on beads
-{{ .CityRoot }}/.gc/worktrees/gastown/crew/beads-alice                    # Alice (from beads) working on gastown
+{{ .CityRoot }}/.gc/worktrees/gascity/crew/beads-alice                    # Alice (from beads) working on gascity
 ```
 
 **Key principles:**
@@ -118,7 +118,7 @@ go here by default. But if you discover bugs/issues in OTHER projects:
 |-------------------|---------|---------|
 | This rig's code ({{ .RigName }}) | Here (default) | `gc bd create "..."` |
 | Beads CLI (beads tool) | **beads** | `gc bd create --rig beads "..."` |
-| `gc` CLI (gas city tool) | **gastown** | `gc bd create --rig gastown "..."` |
+| `gc` CLI (gas city tool) | **gascity** | `gc bd create --rig gascity "..."` |
 | Cross-rig coordination | **HQ** | `gc bd create --prefix hq- "..."` |
 
 **The test**: "Which repo would the fix be committed to?"
@@ -213,7 +213,7 @@ gc mail send {{ .RigName }}/alice -s "Urgent" -m "..." --notify
 ```
 
 Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
+the default namepool yields names like `furiosa` or `nux`. There is no
 `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual

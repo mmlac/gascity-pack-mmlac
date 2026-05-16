@@ -115,8 +115,8 @@ gc bd show hq-abc      # Routes to town beads
 | Issue is about... | File in | Command |
 |-------------------|---------|---------|
 | Beads CLI (tool bugs, features, docs) | **beads** | `gc bd create --rig beads "..."` |
-| `gc` CLI (gas city tool bugs, features) | **gastown** | `gc bd create --rig gastown "..."` |
-| Polecat/witness/refinery/convoy code | **gastown** | `gc bd create --rig gastown "..."` |
+| `gc` CLI (gas city tool bugs, features) | **gascity** | `gc bd create --rig gascity "..."` |
+| Polecat/witness/refinery/convoy code | **gascity** | `gc bd create --rig gascity "..."` |
 | Wyvern game features | **wyvern** | `gc bd create --rig wyvern "..."` |
 | Cross-rig coordination, convoys, mail threads | **HQ** | `gc bd create "..."` (default) |
 | Agent role descriptions, assignments | **HQ** | `gc bd create "..."` (default) |
@@ -125,7 +125,7 @@ gc bd show hq-abc      # Routes to town beads
 
 **The test**: "Which repo would the fix be committed to?"
 - Fix in `anthropics/beads` -> file in beads rig
-- Fix in `anthropics/gas-town` -> file in gastown rig
+- Fix in `mmlac/gascity` -> file in gascity rig
 - Pure coordination (no code) -> file in HQ
 
 **Common mistake**: Filing Beads CLI issues in HQ because you're "coordinating."

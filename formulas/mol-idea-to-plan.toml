@@ -1,7 +1,7 @@
 description = """
 Full pipeline from vague idea to reviewed, beads-ready implementation plan.
 
-This is the Gas City-compatible v2 planning workflow for Gastown.
+This is the Gas City-compatible v2 planning workflow for mmlac.
 
 Upstream's newer workflow uses convoy-style planning formulas, `gt formula run`,
 `gt sling --prompt`, and `--mail-back`. Gas City does not ship those planning

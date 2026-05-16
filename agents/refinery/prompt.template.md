@@ -150,7 +150,7 @@ gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must
 ```
 
 Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
+the default namepool yields names like `furiosa` or `nux`. There is no
 `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
