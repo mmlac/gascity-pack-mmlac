@@ -38,15 +38,6 @@ else
     SYNC="${4:-}"
 fi
 
-sync_worktree() {
-    [ "$SYNC" = "--sync" ] || return 0
-    if ! git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-        return 0
-    fi
-    git -C "$WT" fetch origin 2>/dev/null || true
-    git -C "$WT" pull --rebase 2>/dev/null || true
-}
-
 branch_name() {
     # Namescape worktree branches by target path so multiple cities or rigs
     # can share one underlying repo without colliding on global refs like
@@ -55,9 +46,55 @@ branch_name() {
     printf 'gc-%s-%s' "$AGENT" "$HASH"
 }
 
-# Idempotent: skip if worktree already exists.
+# Compute the upstream default ref once (origin/HEAD). Used both when
+# creating a new worktree (explicit start-point — avoids cutting from a
+# stale local default) and when resetting an existing reused worktree so
+# the per-instance branch can't bleed commits across beads.
+DEFAULT_REF=$(git -C "$RIG_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)
+DEFAULT_BRANCH=""
+if [ -n "$DEFAULT_REF" ]; then
+    DEFAULT_BRANCH=${DEFAULT_REF#refs/remotes/origin/}
+    git -C "$RIG_ROOT" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+fi
+
+# When an existing worktree is reused across bead claims, the per-instance
+# branch (gc-<agent>-<hash>) may carry commits from a prior bead. Reset it
+# to origin/<default> so the polecat formula's branch-setup step starts
+# from clean state. Without this, new bead work stacks on top of stale
+# commits and produces cross-bead branch contamination.
+refresh_existing_worktree() {
+    [ "$SYNC" = "--sync" ] || return 0
+    if ! git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+        return 0
+    fi
+    git -C "$WT" fetch origin >/dev/null 2>&1 || true
+
+    [ -n "$DEFAULT_REF" ] || return 0  # no upstream default → nothing to reset to
+
+    BRANCH=$(branch_name)
+    # Move onto the per-instance branch (creating it from DEFAULT_REF if absent).
+    if ! git -C "$WT" rev-parse --verify --quiet "$BRANCH" >/dev/null 2>&1; then
+        git -C "$WT" checkout -q -B "$BRANCH" "$DEFAULT_REF" 2>/dev/null || return 0
+    else
+        git -C "$WT" checkout -q "$BRANCH" 2>/dev/null || return 0
+    fi
+
+    # Stash uncommitted work so it's recoverable rather than silently destroyed.
+    if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
+        git -C "$WT" stash push -u -m "worktree-setup auto-stash $(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)" >/dev/null 2>&1 || true
+        echo "worktree-setup: stashed dirty working tree in $WT before reset; recover with 'git -C \"$WT\" stash list'" >&2
+    fi
+
+    # Hard reset: drops any commits sitting on the per-instance branch
+    # past origin/<default>. Stale prior-bead commits are intentionally
+    # discarded — they have either already been merged via the refinery
+    # path or were abandoned mid-handoff.
+    git -C "$WT" reset --hard "$DEFAULT_REF" >/dev/null 2>&1 || true
+}
+
+# Idempotent: refresh and skip if worktree already exists.
 if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
-    sync_worktree
+    refresh_existing_worktree
     exit 0
 fi
 
@@ -107,14 +144,31 @@ rmdir "$WT" 2>/dev/null || true
 git -C "$RIG_ROOT" worktree prune >/dev/null 2>&1 || true
 
 BRANCH=$(branch_name)
+
+# If a stale per-instance branch already exists at the rig repo (from a
+# previous worktree that was deleted), force-reset it to origin/<default>
+# so it can't carry forward old commits when we re-attach the worktree.
 if git -C "$RIG_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    if [ -n "$DEFAULT_REF" ]; then
+        git -C "$RIG_ROOT" branch -f "$BRANCH" "$DEFAULT_REF" >/dev/null 2>&1 || true
+    fi
     if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" "$BRANCH"; then
         echo "worktree-setup: failed to create worktree at $WT from $RIG_ROOT (branch $BRANCH)" >&2
         restore_stage
         exit 1
     fi
 else
-    if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" -b "$BRANCH"; then
+    # Cut the new branch from origin/<default> explicitly (not from
+    # whatever happens to be the local HEAD) so multi-bead reuse can't
+    # drift the worktree behind origin's actual default.
+    if [ -n "$DEFAULT_REF" ]; then
+        worktree_add_ok=0
+        GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" -b "$BRANCH" "$DEFAULT_REF" && worktree_add_ok=1
+    else
+        worktree_add_ok=0
+        GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" -b "$BRANCH" && worktree_add_ok=1
+    fi
+    if [ "$worktree_add_ok" != "1" ]; then
         echo "worktree-setup: failed to create worktree at $WT from $RIG_ROOT (branch $BRANCH)" >&2
         restore_stage
         exit 1
