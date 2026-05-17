@@ -1,0 +1,26 @@
+# reviewer-fallback — Claude-backed fallback for the codex-backed reviewer pool.
+#
+# The primary reviewer agent (../reviewer/) uses provider=codex, which is
+# subject to OpenAI usage caps. When the codex pool hits its quota, the
+# witness re-routes review-bound beads to this pool by setting
+# `gc.routed_to=<rig>/reviewer-fallback`. Until that re-routing fires,
+# this pool stays at min_active_sessions=0 and consumes nothing.
+#
+# Same prompt as the primary reviewer (../reviewer/prompt.template.md)
+# so review semantics are identical — only the provider differs.
+
+scope = "rig"
+provider = "claude"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/reviewers-fallback/{{.AgentBase}}"
+prompt_template = "/gc/packs/mmlac/agents/reviewer/prompt.template.md"
+namepool = "/gc/packs/mmlac/shared/reviewer/namepool.txt"
+nudge = "Fallback reviewer — primary reviewer pool is quota-blocked. Run gc hook to claim routed work."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+idle_timeout = "15m"
+min_active_sessions = 0
+max_active_sessions = 2
+
+[option_defaults]
+model = "sonnet"
+effort = "max"

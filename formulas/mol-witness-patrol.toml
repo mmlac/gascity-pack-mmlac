@@ -507,9 +507,100 @@ echo "$REV_QUEUE" | jq -c --argjson now "$NOW_EPOCH" '
 emitted for any over threshold. Empty queue is a normal exit."""
 
 [[steps]]
+id = "check-reviewer-quota-fallback"
+title = "Detect quota-blocked reviewers and route to fallback pool"
+needs = ["check-reviewer"]
+description = '''
+The primary reviewer pool (`<rig>/reviewer`) uses `provider=codex` which
+is subject to OpenAI usage caps. When the entire codex pool is blocked,
+every bead routed to `<rig>/reviewer` sits in the queue indefinitely.
+The mmlac pack ships a fallback agent `<rig>/reviewer-fallback` that
+uses `provider=claude` and stays at zero sessions until needed.
+
+This step detects pool-wide quota blockage and re-routes pending review
+work to the fallback. Idempotent: re-routes only on detection; once
+beads are moved, they reach the fallback pool's hook on the next cycle.
+
+**Resolve rig:**
+```bash
+RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+```
+
+**Step 1: Find live reviewer sessions in this rig.**
+```bash
+REVIEWERS=$(gc session list --json --state=active 2>/dev/null \
+  | jq -r --arg rig "$RIG" '.[] | select(.Template == ($rig + "/reviewer")) | .ID')
+```
+
+If `$REVIEWERS` is empty, there is nothing to check — skip the rest of
+this step. The fallback pool only fires when an active primary reviewer
+exists AND is quota-blocked.
+
+**Step 2: Check each reviewer's last output for quota markers.**
+
+Use `gc session peek` to read the tail of each session's pane. Match on
+provider-specific quota phrases. Patterns:
+- OpenAI / Codex: `usage limit`, `Try again at`, `rate limit`, `exceeded your`, `429`
+- Add provider-specific markers here as new providers are introduced.
+
+```bash
+QUOTA_BLOCKED_COUNT=0
+TOTAL=0
+for SID in $REVIEWERS; do
+  TOTAL=$((TOTAL + 1))
+  TAIL=$(gc session peek "$SID" 2>/dev/null | tail -50)
+  if echo "$TAIL" | grep -qiE 'usage limit|try again at|rate.limit|exceeded your|429'; then
+    QUOTA_BLOCKED_COUNT=$((QUOTA_BLOCKED_COUNT + 1))
+    echo "WITNESS: reviewer $SID appears quota-blocked"
+  fi
+done
+```
+
+**Step 3: If all live reviewers are quota-blocked, re-route pending work.**
+
+Only act if `QUOTA_BLOCKED_COUNT == TOTAL` AND `TOTAL > 0`. Partial
+blockage (one of three) means the pool still has working capacity —
+don't pre-emptively re-route.
+
+```bash
+if [ "$TOTAL" -gt 0 ] && [ "$QUOTA_BLOCKED_COUNT" -eq "$TOTAL" ]; then
+  echo "WITNESS: entire reviewer pool ($TOTAL/$TOTAL) is quota-blocked; routing to reviewer-fallback"
+  TO_REROUTE=$(gc bd list --status=open --json --limit=0 \
+    | jq -r --arg rig "$RIG" '.[]
+        | select(.metadata."gc.routed_to" == ($rig + "/reviewer"))
+        | .id')
+  for BEAD in $TO_REROUTE; do
+    gc bd update "$BEAD" \
+      --set-metadata "gc.routed_to=$RIG/reviewer-fallback" \
+      --append-notes "Witness re-route: primary reviewer pool quota-blocked. Forwarded to ${RIG}/reviewer-fallback."
+    echo "WITNESS: re-routed $BEAD → $RIG/reviewer-fallback"
+  done
+
+  # Tell mayor so they can decide on provider-config follow-up.
+  if [ -n "$TO_REROUTE" ]; then
+    gc mail send mayor/ \
+      -s "REVIEWER_POOL_QUOTA_BLOCKED: re-routed $(echo "$TO_REROUTE" | wc -w | tr -d " ") bead(s) to ${RIG}/reviewer-fallback" \
+      -m "All $TOTAL active reviewer sessions in $RIG hit codex quota. Routed pending review work to the claude-backed fallback. Primary pool will recover at quota reset; consider reducing dependence on a single provider for review."
+  fi
+fi
+```
+
+**Step 4: When quota recovers, the primary pool resumes naturally.**
+
+No reverse-routing is needed. Beads already routed to the fallback
+will be processed there; new review-bound beads from polecats will
+default to `<rig>/reviewer` again (polecats set this; the witness
+only intervenes on detected blockage). Steady-state preference is
+primary; fallback only activates when the witness sees the blockage.
+
+**Exit criteria:** Either no live reviewers (skip), some reviewers
+working (no re-route), or full pool blockage (re-route + notify mayor).
+'''
+
+[[steps]]
 id = "check-polecat-health"
 title = "Check polecat work progress"
-needs = ["check-reviewer"]
+needs = ["check-reviewer-quota-fallback"]
 description = """
 Detect polecats that are alive but not making progress on their work.
 
