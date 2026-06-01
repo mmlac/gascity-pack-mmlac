@@ -1,0 +1,56 @@
+# Famous rock-band–themed pool names for polecat-haiku.
+#
+# Disjoint from polecat-opus's namepool.txt (Mad Max) and polecat-sonnet's
+# namepool-sonnet.txt (philosophers) so tiers never share a persona name —
+# different tiers picking the same persona would collapse to the same
+# worktree path and cause sibling-branch contamination.
+zeppelin
+sabbath
+floyd
+queen
+rush
+tool
+nirvana
+metallica
+pantera
+genesis
+cream
+doors
+wings
+eagles
+heart
+journey
+boston
+styx
+foreigner
+chicago
+supertramp
+toto
+crimson
+soundgarden
+pearljam
+radiohead
+muse
+coldplay
+weezer
+blur
+oasis
+interpol
+wilco
+clash
+ramones
+blondie
+stooges
+pixies
+byrds
+police
+cars
+kinks
+animals
+hollies
+yardbirds
+allman
+zztop
+aerosmith
+priest
+maiden

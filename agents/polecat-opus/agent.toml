@@ -4,8 +4,12 @@
 # to opus and capped low because opus is expensive. Use for high-complexity
 # work: deep refactors, architecture-level changes, gnarly bugs.
 #
-# Worktree path includes {{.Agent}} so polecat-opus/furiosa, polecat-sonnet/furiosa,
-# and polecat/furiosa coexist on disk without collision when the namepool repeats.
+# Persona pool is Mad Max: Fury Road names (opus-only) — disjoint from
+# polecat-sonnet (philosophers) and polecat-haiku (rock bands). In practice
+# {{.Agent}} in the work_dir resolved to the persona-qualified name, NOT
+# the tier, so two tiers picking the same persona collapsed to the same
+# worktree path and caused sibling-branch contamination. Per-tier disjoint
+# pools eliminate that class of bug deterministically.
 #
 # Routing in:  gc sling <rig>/polecat-opus <bead>
 # Routing out (on review/refinery rejection): preserved via the `worker_pool`

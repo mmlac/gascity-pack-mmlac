@@ -1,0 +1,56 @@
+# Western-philosopher–themed pool names for polecat-sonnet.
+#
+# Disjoint from polecat-opus's namepool.txt (Mad Max) and polecat-haiku's
+# namepool-haiku.txt (rock bands) so tiers never share a persona name —
+# different tiers picking the same persona would collapse to the same
+# worktree path and cause sibling-branch contamination.
+plato
+aristotle
+socrates
+kant
+hegel
+nietzsche
+spinoza
+descartes
+hume
+locke
+rousseau
+voltaire
+kierkegaard
+wittgenstein
+foucault
+sartre
+camus
+heidegger
+marx
+hobbes
+leibniz
+schopenhauer
+mill
+russell
+berkeley
+james
+dewey
+peirce
+godel
+popper
+quine
+rawls
+nozick
+derrida
+deleuze
+lacan
+habermas
+gadamer
+husserl
+frege
+tarski
+carnap
+anscombe
+ricoeur
+ayer
+putnam
+davidson
+kripke
+searle
+arendt

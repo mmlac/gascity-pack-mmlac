@@ -5,8 +5,12 @@
 # config tweaks, anything where speed and cost matter more than depth.
 # Cap is high because haiku is cheap.
 #
-# Worktree path includes {{.Agent}} so polecat-opus/furiosa, polecat-sonnet/furiosa,
-# and polecat/furiosa coexist on disk without collision when the namepool repeats.
+# Persona pool is famous-rock-band names (haiku-only) — disjoint from
+# polecat-opus (Mad Max) and polecat-sonnet (philosophers). In practice
+# {{.Agent}} in the work_dir resolved to the persona-qualified name, NOT
+# the tier, so two tiers picking the same persona collapsed to the same
+# worktree path and caused sibling-branch contamination. Per-tier disjoint
+# pools eliminate that class of bug deterministically.
 #
 # Routing in:  gc sling <rig>/polecat-haiku <bead>
 # Routing out (on review/refinery rejection): preserved via the `worker_pool`
@@ -17,7 +21,7 @@ provider = "claude"
 wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.Agent}}/{{.AgentBase}}"
 prompt_template = "/gc/packs/mmlac/shared/polecat/prompt.template.md"
-namepool = "/gc/packs/mmlac/shared/polecat/namepool.txt"
+namepool = "/gc/packs/mmlac/shared/polecat/namepool-haiku.txt"
 nudge = "Run gc hook; it checks assigned work first, then routed pool work."
 pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 idle_timeout = "2h"
