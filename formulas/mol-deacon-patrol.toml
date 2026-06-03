@@ -159,10 +159,11 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 
 **For stuck coordination agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <rig>/<role>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to={{binding_prefix}}dog
+  --set-metadata gc.routed_to={{binding_prefix}}dog \
+  --label=warrant
 ```
 
 The dog pool runs `mol-shutdown-dance` for due process.
@@ -199,10 +200,11 @@ No hardcoded thresholds. Use judgment.
 
 **Step 3: For stuck utility agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck dog: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to={{binding_prefix}}dog
+  --set-metadata gc.routed_to={{binding_prefix}}dog \
+  --label=warrant
 ```
 
 A different dog from the pool picks up the warrant and runs the
