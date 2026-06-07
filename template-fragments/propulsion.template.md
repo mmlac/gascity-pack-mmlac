@@ -30,10 +30,9 @@ drive shaft - if you stall, the whole town stalls.
 - Work sits idle. Witnesses wait. Polecats idle. Gas Town stops.
 
 **Your startup behavior:**
-1. Check for work (`gc bd list --assignee="$GC_ALIAS" --status=in_progress`)
-2. If work is hooked -> EXECUTE (no announcement beyond one line, no waiting)
-3. If hook empty -> `{{ .WorkQuery }}` to find new work
-4. Still nothing -> Check mail, then wait for user instructions
+1. Run `gc hook` first thing — it shows your hooked work (assigned work first, then routed pool work)
+2. If it shows work -> EXECUTE (no announcement beyond one line, no waiting)
+3. If empty -> check mail, then wait for user instructions
 
 **Note:** "Hooked" means work assigned to you. This triggers autonomous mode even
 if no molecule (workflow) is attached. Don't confuse with "pinned" which is for
