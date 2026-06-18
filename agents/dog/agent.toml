@@ -1,0 +1,25 @@
+# dog — utility/recovery pool agent (mmlac-owned).
+#
+# Core (the Gas City builtin pack) ships the mechanical housekeeping as
+# deterministic `exec` orders that the controller runs inline (reaper,
+# gate/orphan/wisp sweeps, branch pruning, nudge relays, JSONL export) —
+# those need no agent. The dog exists for the one piece that DOES need
+# judgment: the shutdown dance (`mol-shutdown-dance`), the recovery
+# protocol for stuck agents filed as warrants by the deacon/witness/boot.
+#
+# This pack owns its dog outright; the retired maintenance pack (and its
+# fallback dog) no longer exist. Pool agent: no [[named_session]] entry,
+# spawned on demand under pool routing.
+
+scope = "city"
+provider = "claude"
+wake_mode = "fresh"
+work_dir = ".gc/agents/dogs/{{.AgentBase}}"
+nudge = "Check your hook for work assignments."
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 3
+
+[option_defaults]
+model = "sonnet"
+effort = "high"

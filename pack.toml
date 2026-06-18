@@ -1,15 +1,23 @@
 # Gas Town — domain-specific coding workflow pack.
 #
 # mmlac roles: mayor (coordinator), deacon (patrol), boot (watchdog),
-# plus rig-scoped agents (witness, refinery, polecat, reviewer).
-# Dog (utility pool) is defined here with tmux theming; maintenance provides
-# the fallback (unthemed) dog. Mechanical housekeeping lives in maintenance.
+# dog (utility/recovery pool), plus rig-scoped agents (witness, refinery,
+# polecat, reviewer).
+#
+# This pack owns its dog pool and the mol-shutdown-dance formula outright.
+# Mechanical housekeeping (gate/orphan/wisp sweeps, branch pruning, nudge
+# relays, JSONL export, reaper) ships with the Gas City builtin core pack
+# as deterministic exec orders the controller runs inline — the city
+# composes core explicitly (gc init writes the [imports.core] import; gc
+# doctor --fix repairs it). The retired maintenance pack no longer exists,
+# and cross-pack agent name collisions are hard errors, so no fallback or
+# composition-ordering dance is needed.
 #
 # Referenced by both workspace.pack and rigs[].pack:
-#   workspace.pack → expands city-scoped agents only (mayor, deacon, boot)
+#   workspace.pack → expands city-scoped agents only (mayor, deacon, boot, dog)
 #   rigs[].pack    → expands rig agents only (witness, refinery, polecat, reviewer)
 #
-# Pool agents (polecat, reviewer) are auto-expanded by the pack and have
+# Pool agents (dog, polecat, reviewer) are auto-expanded by the pack and have
 # no [[named_session]] entry — they spawn ephemerally under pool routing.
 # Crew members are individually named and declared inline in city.toml.
 
@@ -17,19 +25,11 @@
 name = "mmlac"
 schema = 2
 
-[imports.maintenance]
-source = "../../.gc/system/packs/maintenance"
-
 [global]
 session_live = [
     "{{.ConfigDir}}/assets/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/assets/scripts/tmux-keybindings.sh {{.ConfigDir}}",
 ]
-
-[[patches.agent]]
-name = "dog"
-wake_mode = "fresh"
-work_dir = ".gc/agents/dogs/{{.AgentBase}}"
 
 [[named_session]]
 template = "mayor"
