@@ -1,4 +1,5 @@
-# polecat-opus — Claude Opus 4.7 variant of the polecat pool.
+# polecat-opus — Claude Opus 5 variant of the polecat pool.
+# (The "opus" tier alias is repointed to claude-opus-5 in /gc/city.toml.)
 #
 # Same lifecycle as the bare `polecat` agent (mol-polecat-work), but pinned
 # to opus and capped low because opus is expensive. Use for high-complexity
@@ -31,4 +32,6 @@ default_sling_formula = "mol-polecat-work"
 
 [option_defaults]
 model = "opus"
-effort = "high"
+# xhigh is Anthropic's recommended starting effort for coding/agentic work on
+# Opus 5 (it is also Claude Code's own default there); high was the Opus 4.x setting.
+effort = "xhigh"
