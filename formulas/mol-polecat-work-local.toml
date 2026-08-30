@@ -1,0 +1,82 @@
+description = """
+Slim polecat lifecycle for LOCAL MODELS (devstral/qwen on the opencode harness).
+
+The full mol-polecat-work formula is too much ceremony for weaker local models:
+qwen-122B self-starts and tool-calls correctly but drowns in the "Load context /
+verify assignment" step, exhausting its turns inspecting convoys/metadata before
+implementing. This variant collapses the whole lifecycle into ONE continuous step
+so the model never has to "advance" between steps — local models tend to quit the
+moment the visible deliverable (the file) exists, skipping commit + handoff.
+
+Flow downstream is unchanged: pool -> polecat -> reviewer -> refinery -> closed.
+"""
+formula = "mol-polecat-work-local"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+[vars.base_branch]
+description = "Base branch to branch from and target (default: main; may be overridden by metadata.target at sling time)"
+default = "main"
+
+[[steps]]
+id = "do-and-submit"
+title = "Implement, commit, and submit — one continuous run, do not stop early"
+description = """
+This is your ONLY step. Run it top to bottom in one go.
+
+**STOP CONDITION — read this first:** You are finished ONLY after
+`gc runtime drain-ack` has run. Writing the file is NOT finishing. An
+uncommitted, unpushed file is LOST — the reviewer never sees it and your work
+is wasted. After you create or edit a file, you MUST keep calling tools:
+commit -> push -> reassign to reviewer -> drain-ack. Do not summarize, do not
+wait for approval — there is no approval step. Keep going until drain-ack runs.
+
+**1. Read your task:**
+```bash
+gc bd show {{issue}}
+```
+The title/description IS your task. Don't inspect convoys, dependencies, or other beads.
+
+**2. Isolated worktree + feature branch (reuse if one already exists):**
+```bash
+git fetch --prune origin
+WT="$(pwd)/worktrees/{{issue}}"
+EXIST=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
+if [ -n "$EXIST" ] && [ -d "$EXIST" ]; then
+  cd "$EXIST"
+else
+  git worktree add "$WT" -b "polecat/{{issue}}" "origin/{{base_branch}}" && cd "$WT"
+  gc bd update {{issue}} --set-metadata work_dir="$WT" --set-metadata branch="polecat/{{issue}}"
+fi
+```
+
+**3. Implement the task inside this worktree, then IMMEDIATELY commit** (one breath —
+do not pause between writing and committing):
+```bash
+# ...create/edit the files the bead asks for...
+git add -A
+git commit -m "<imperative subject> ({{issue}})"
+```
+
+**4. Submit — run this NOW, same session, do not stop:**
+```bash
+git push origin HEAD
+gc bd update {{issue}} \
+  --set-metadata branch="$(git branch --show-current)" \
+  --set-metadata target={{base_branch}} \
+  --notes "Implemented"
+REVIEWER_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}reviewer"
+gc bd update {{issue}} --status=open --assignee="" --set-metadata gc.routed_to="$REVIEWER_TARGET"
+gc runtime drain-ack
+exit
+```
+
+**Self-check before you stop:** Did `git commit` run? Did `git push` run? Did you
+reassign the bead to the reviewer and run `gc runtime drain-ack`? If any answer is
+no, you are NOT done — go back and finish. A created file with no commit is failure.
+
+**Exit criteria:** task committed, branch pushed, bead reassigned to the reviewer,
+drain acknowledged, session exited.
+"""
