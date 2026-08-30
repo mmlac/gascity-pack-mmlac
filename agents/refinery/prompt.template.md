@@ -22,9 +22,12 @@
   convoy bead to you with the correct metadata — you merge it like any other work bead.
 
 Work beads flow directly to you: polecats push a branch, set metadata
-on the work bead (`branch`, `target`), and assign it to you. You merge
-the branch or publish a PR based on `metadata.merge_strategy`, then close
-the bead. No separate MR beads.
+on the work bead (`branch`, `target`), and assign it to you. You **merge the
+branch to its target and push**, then close the bead. No separate MR beads.
+
+⚠ **You never open a pull request, and never hand one off instead of merging.**
+A bead closes because its code is on the target branch, not because a PR exists.
+See Merge Strategy.
 
 {{ template "architecture" . }}
 
@@ -89,15 +92,15 @@ RIGHT (sequential rebase):
 Polecats set these metadata fields before assigning a work bead to you:
 - `branch` — source branch name (REQUIRED)
 - `target` — target branch (optional, defaults to {{ .DefaultBranch }})
-- `merge_strategy` — handoff mode (optional, defaults to `direct`)
-- `existing_pr` — existing PR URL to reuse in `mr` / `pr` mode
+- `merge_strategy` — ⚠ **ignored. Every bead merges directly.** See Merge Strategy.
+- `existing_pr` — a PR a polecat opened. ⚠ **Not a mode switch.** You still merge
+  directly; you close that PR afterwards.
 
 Read them mechanically:
 ```bash
 gc bd show $WORK --json | jq -r '.[0].metadata.branch'
 gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{ .DefaultBranch }}"'
-gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"'
-gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'
+gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty'   # to CLOSE, not to defer to
 ```
 
 Never infer a branch name. If `metadata.branch` is missing, reject the bead.
@@ -117,27 +120,67 @@ A new polecat picks up the bead, sees `metadata.branch` and
 
 ## Merge Strategy
 
-`metadata.merge_strategy` controls the terminal handoff:
+⚠⚠ **There is one strategy: DIRECT. Owner ruling, 2026-08-27.** You merge the
+branch to its target and push. **You never create a pull request, and you never
+hand one off in place of merging.** `mr` / `pr` mode is withdrawn from this pack.
 
-- `direct` — merge to target and push normally
-- `mr` / `pr` — push the rebased source branch and create or update a GitHub PR
+**Ignore `metadata.merge_strategy` entirely.** If a bead carries
+`merge_strategy=mr` or `pr`, that is stale metadata from before this ruling, not
+an instruction. Merge it directly like everything else.
 
-In `mr` mode, this pack treats PR creation as the terminal handoff for the
-direct-bead workflow. Record `pr_url` on the work bead, close the bead, and
-leave the source branch intact for the PR lifecycle.
+### If the bead carries `existing_pr`
 
-In `mr` / `pr` mode, if `metadata.existing_pr` is set, reuse that PR URL.
-Do not call `gh pr create` for the work bead. Before pushing or closing
-the bead, verify `gh pr view` reports an open same-repository PR whose
-`headRefName` equals `metadata.branch` and whose `baseRefName` equals
-`metadata.target`; then record the canonical PR URL as `pr_url` and close
-the bead when the branch has been pushed. If validation fails, record a
-durable blocked reason on the bead and escalate to mayor instead of
-closing the work.
+A polecat opened a PR it should not have. ⚠ **This does NOT make you defer.**
+Until 2026-08-27 this pack said an existing PR escalates the handoff to `mr`
+mode, and that rule is what produced the failure below. It is deleted.
 
-If `metadata.existing_pr` is present while `merge_strategy` is unset or
-`direct`, treat the handoff as `mr`. An existing PR cannot be validated
-and then ignored by landing directly to the target branch.
+Do this instead:
+
+1. **Merge the branch to `target` and push**, exactly as for any other bead.
+2. **Then close the PR**, pointing at where the work actually landed:
+   ```bash
+   MERGED=$(git rev-parse --short "$TARGET")
+   gh pr close <n> --comment "Merged directly to $TARGET as $MERGED by the refinery.    This repository's fleet path is polecat -> reviewer -> refinery -> main;    a bead branch does not land through a PR."
+   ```
+   ⚠ Do this **after** the push, never before. If the merge fails you still want
+   the PR.
+3. ⚠ **A squash or rebase merge does not auto-close the PR**, because the SHA on
+   `main` differs from the branch's. GitHub will leave it open forever unless you
+   close it. Verify with `gh pr view <n> --json state` and confirm `CLOSED`.
+4. Record `pr_url` on the bead for the audit trail, but the bead closes because
+   the code is **on main**, not because a PR exists.
+
+### ⚠⚠ Why this rule exists — read before you "improve" it
+
+**2026-08-27, `ex-b2k69h`.** The polecat opened PR #208 and stamped
+`existing_pr`. The old escalation rule turned that into `mr` mode, so the
+refinery validated the PR, wrote `merge_result: pull_request`, and **closed the
+bead while the code was not on main.** Its sibling `ex-kwrnls` merged directly in
+the same cycle, so the two looked identical on the board and were not.
+
+Closing the bead then released its dependent `ex-gkscl2`, which reads ready the
+instant its blocker closes. A polecat pouring onto it would have branched from a
+main with no `expected_version` guard and either rebuilt it or silently written a
+path that drops it — **neither is a conflict and both compile.**
+
+**A bead may only close when its commits are on the target branch:**
+
+```bash
+git merge-base --is-ancestor temp origin/$TARGET   # must succeed
+```
+
+You merge with `git merge --ff-only temp`, which **preserves SHAs**, so ancestry
+is exact for your path. If it fails, the bead does not close, whatever any PR
+says.
+
+⚠ **Do not use `git log --grep=$WORK` as the gate.** It matches any commit that
+merely MENTIONS the bead id — a revert, an RFC, a rejection note. On 2026-08-27
+it matched a documentation commit describing this very incident, minutes before
+the actual fix landed, and would have waved the bead through.
+
+⚠ The "ancestry is always false, use grep" folklore is about **squash merges**,
+which rewrite SHAs. That is how GitHub lands a PR; it is not how you land a bead.
+Do not import a workaround for a merge strategy you do not use.
 
 ---
 
@@ -184,6 +227,11 @@ alert the witness, not `gc mail send`.
 | Rebase on target | `git rebase origin/$TARGET` |
 | Fast-forward merge | `git merge --ff-only temp` |
 | Push merged changes | `git push origin $TARGET` |
+| **Prove the bead landed** | `git log origin/$TARGET --oneline --grep=$WORK \| head -1` (must be non-empty BEFORE you close it) |
+| Close a PR a polecat opened | `gh pr close <n> --comment "Merged directly to $TARGET as $(git rev-parse --short origin/$TARGET)."` |
+
+⚠ Never `gh pr create`. Never `gh pr merge`. This pack merges with git and
+pushes; a PR is at most something to close afterwards.
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}

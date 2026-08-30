@@ -19,17 +19,20 @@ No separate MR beads. The polecat sets metadata (branch, target) on
 the work bead and assigns it to the refinery. On rejection, the
 refinery puts the bead back in the pool with rejection metadata.
 
-Merge strategy is per-work-bead metadata:
-- `direct` (default): fast-forward merge to target and push
-- `mr` / `pr`: publish a GitHub pull request instead of landing directly
+⚠⚠ There is ONE merge strategy: DIRECT. Owner ruling, 2026-08-27. The
+refinery fast-forward merges the branch to its target and pushes. It never
+creates a pull request and never hands one off in place of merging.
+`metadata.merge_strategy` is not read, and `mr` / `pr` mode is removed.
 
-In `mr` mode, refinery treats PR publication as the terminal handoff for
-the direct-bead workflow: it records the PR URL on the work bead and
-closes the bead once the PR is verified.
+A bead may only close when its code is on the target branch, proved by
+content (`git log origin/$TARGET --grep=$WORK`) rather than by ancestry,
+because this repository squash-merges. If a bead carries `existing_pr`, a
+polecat opened a PR it should not have: merge directly anyway, then close
+that PR.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 4
+version = 6
 contract = "graph.v2"
 
 [vars]
@@ -324,106 +327,23 @@ description = """
 **Config: target_branch = {{target_branch}}**
 **Config: delete_merged_branches = {{delete_merged_branches}}**
 
-Read the merge target and merge strategy from the work bead metadata:
+⚠⚠ **THERE IS ONE STRATEGY: DIRECT. Owner ruling, 2026-08-27.** You merge the
+branch to its target and push. You NEVER create a pull request, and you NEVER
+hand one off in place of merging. `mr` / `pr` mode is removed from this formula.
+
+Read the merge target from the work bead metadata:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
-MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
-if [ "$MERGE_STRATEGY" = "pr" ]; then
-  MERGE_STRATEGY="mr"
-fi
-if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
-  echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
-  MERGE_STRATEGY="mr"
-fi
-
-block_existing_pr() {
-  reason="$1"
-  gc bd update $WORK \
-    --assignee="" \
-    --set-metadata merge_result=blocked \
-    --set-metadata gc.routed_to=human \
-    --set-metadata blocked_reason="$reason"
-  gc mail send mayor/ -s "ESCALATION: invalid existing_pr for $WORK" -m "$reason
-Work bead: $WORK
-Existing PR: $EXISTING_PR
-Branch: $BRANCH
-Target: $TARGET"
-  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
-  gc bd update "$NEXT" --assignee=$GC_AGENT
-  CURRENT_WISP=${GC_BEAD_ID:-}
-  if [ -n "$CURRENT_WISP" ]; then
-    gc bd mol burn "$CURRENT_WISP" --force
-  else
-    echo "Could not infer current wisp; burn this wisp manually after recording the summary."
-  fi
-  echo "$reason"
-  echo "STOP. Existing PR metadata needs human correction."
-  gc runtime drain-ack
-  exit 1
-}
-
-pr_lookup_missing() {
-  case "$1" in
-    *"Could not resolve to a PullRequest"*|*"could not resolve to a PullRequest"*|*"no pull requests found"*|*"Not Found"*|*"not found"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
-  if [ -z "$BRANCH" ] || [ "$BRANCH" = "null" ]; then
-    block_existing_pr "metadata.existing_pr is set but metadata.branch is missing."
-  fi
-
-  if [ -z "$ORIGIN_REPO" ]; then
-    echo "Could not resolve origin repository for existing PR validation. STOP. Debug and retry without mutating bead state."
-    gc runtime drain-ack
-    exit 1
-  fi
-
-  EXISTING_PR_ERR=$(mktemp)
-  EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")
-  EXISTING_PR_STATUS=$?
-  EXISTING_PR_ERROR=$(cat "$EXISTING_PR_ERR")
-  rm -f "$EXISTING_PR_ERR"
-  if [ "$EXISTING_PR_STATUS" -ne 0 ] || [ -z "$EXISTING_PR_INFO" ]; then
-    if pr_lookup_missing "$EXISTING_PR_ERROR"; then
-      block_existing_pr "Existing PR $EXISTING_PR was not found or is not accessible."
-    fi
-    echo "Could not resolve existing PR $EXISTING_PR. STOP. Debug and retry without mutating bead state."
-    [ -n "$EXISTING_PR_ERROR" ] && echo "$EXISTING_PR_ERROR"
-    gc runtime drain-ack
-    exit 1
-  fi
-
-  EXISTING_PR_STATE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.state')
-  EXISTING_PR_HEAD=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRefName')
-  EXISTING_PR_BASE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.baseRefName')
-  EXISTING_PR_URL=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.url')
-  EXISTING_PR_REPO=$(printf '%s\n' "$EXISTING_PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')
-  EXISTING_PR_HEAD_REPO=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')
-
-  if [ "$EXISTING_PR_STATE" != "OPEN" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR is $EXISTING_PR_STATE, want OPEN."
-  fi
-  if [ "$EXISTING_PR_HEAD" != "$BRANCH" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR targets branch $EXISTING_PR_HEAD, want $BRANCH."
-  fi
-  if [ "$EXISTING_PR_BASE" != "$TARGET" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR targets base $EXISTING_PR_BASE, want $TARGET."
-  fi
-  if [ "$EXISTING_PR_REPO" != "$ORIGIN_REPO" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR belongs to repo $EXISTING_PR_REPO, want $ORIGIN_REPO."
-  fi
-  if [ "$EXISTING_PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO."
-  fi
-fi
 ```
 
-**If MERGE_STRATEGY = "direct" (default):**
+⚠ `metadata.merge_strategy` is **not read**. If a bead carries `merge_strategy=mr`
+or `pr`, that is stale metadata from before this ruling, not an instruction.
+
+⚠ `metadata.existing_pr` is **not a mode switch**. It means a polecat opened a PR
+it should not have. You still merge directly; you close that PR afterwards, in
+step 5.
 
 **1. Merge and push target branch:**
 ```bash
@@ -437,11 +357,46 @@ git push origin $TARGET
 git fetch origin
 LOCAL=$(git rev-parse $TARGET)
 REMOTE=$(git rev-parse origin/$TARGET)
-[ "$LOCAL" = "$REMOTE" ] || echo "PUSH FAILED — do not proceed"
+[ "$LOCAL" = "$REMOTE" ] || echo "PUSH FAILED - do not proceed"
 ```
 If SHAs differ: STOP. Debug and retry. Do NOT continue.
 
-**3. Record merge metadata and close work bead:**
+**3. ⚠⚠ PROVE THE BEAD'S COMMITS ARE ON THE TARGET:**
+```bash
+git fetch origin
+# You merged with --ff-only, which PRESERVES SHAs, so ancestry is exact here.
+if ! git merge-base --is-ancestor temp origin/$TARGET; then
+  echo "STOP. temp is not an ancestor of origin/$TARGET. Do not close the bead."
+  gc runtime drain-ack
+  exit 1
+fi
+echo "landed: $(git log origin/$TARGET --oneline -1)"
+```
+
+⚠⚠ **Use ancestry here, NOT `git log --grep=$WORK`.** Both halves matter:
+
+- **Ancestry is exact for YOUR path.** Step 1 is `git merge --ff-only temp`, so
+  the target literally fast-forwards to `temp`'s commit. The SHA is unchanged and
+  `--is-ancestor` answers the real question.
+- **`--grep=$WORK` has false positives**, which is how it failed on 2026-08-27:
+  `git log origin/main --grep=ex-b2k69h` matched a *documentation* commit whose
+  message merely described the incident, minutes before the actual fix landed.
+  Any commit that MENTIONS a bead id satisfies a grep -- a revert, a rejection
+  note, an RFC. That is not proof the code is there.
+
+⚠ The "ancestry is always false, use grep" folklore is about **squash merges**,
+which rewrite SHAs. That is how GitHub lands a PR, and it is NOT how you land a
+bead. Do not import the workaround for a merge strategy you do not use. If you
+ever find yourself verifying someone else's squash merge, grep is the weaker
+tool you fall back to, and you read the matched commit before believing it.
+
+⚠⚠ **A bead may ONLY close when its code is on the target branch.** On
+2026-08-27 this step closed `ex-b2k69h` on a PR handoff with the code still off
+`main`. That released the bead's dependent `ex-gkscl2`, which reads ready the
+instant its blocker closes, onto a `main` missing the guard it builds on.
+Neither outcome is a conflict and both compile, which is why this gate is here.
+
+**4. Record merge metadata and close work bead:**
 ```bash
 gc bd update $WORK \
   --set-metadata merge_result=merged \
@@ -450,155 +405,37 @@ gc bd update $WORK \
 gc bd close $WORK --reason "Merged to $TARGET at $(git rev-parse --short HEAD)"
 ```
 
-**4. Cleanup:**
+**5. Close a pull request the polecat should not have opened:**
+```bash
+if [ -n "$EXISTING_PR" ]; then
+  MERGED_SHORT=$(git rev-parse --short origin/$TARGET)
+  gh pr close "$EXISTING_PR" --comment "Merged directly to $TARGET as $MERGED_SHORT by the refinery. This repository's fleet path is polecat -> reviewer -> refinery -> $TARGET; a bead branch does not land through a pull request. See forged-conventions rule 12."
+  PR_STATE_AFTER=$(gh pr view "$EXISTING_PR" --json state -q '.state')
+  if [ "$PR_STATE_AFTER" != "CLOSED" ] && [ "$PR_STATE_AFTER" != "MERGED" ]; then
+    gc mail send mayor/ -s "Could not close stray PR for $WORK" -m "PR: $EXISTING_PR
+State after close attempt: $PR_STATE_AFTER
+The merge itself SUCCEEDED; only the PR cleanup failed. Bead $WORK is closed and
+its code is on $TARGET. Close the PR by hand."
+  fi
+fi
+```
+⚠ Do this **after** the push, never before: if the merge fails you still want the
+PR. ⚠ A squash or rebase merge does **not** auto-close a PR, because the SHA on
+the target differs from the branch's. GitHub leaves it open forever unless you
+close it explicitly, which is why the state is re-read.
+
+⚠ Failing to close the PR is **not** a merge failure. Mail the mayor and carry on;
+do not reopen, revert, or block the bead over it.
+
+**6. Cleanup:**
 ```bash
 git branch -d temp
 ```
 If delete_merged_branches = "true": `git push origin --delete $BRANCH`
 
-**If MERGE_STRATEGY = "mr":**
-
-Refinery does NOT land the branch directly. Instead it publishes a pull
-request and treats PR creation as the terminal handoff for this work bead.
-
-**1. Push the rebased branch back to origin:**
-```bash
-git checkout temp
-git push origin HEAD:$BRANCH --force-with-lease
-```
-If `--force-with-lease` fails, the existing PR branch moved after your
-fetch. STOP, fetch the latest branch, rebase your temp branch again, and
-retry with `--force-with-lease`. Do not use plain `--force`.
-
-**2. Reuse, create, or discover the pull request:**
-```bash
-EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.[0].title')
-PR_BODY=$(cat <<EOF
-## Summary
-
-Automated pull request published by mmlac Refinery.
-
-- Issue: $WORK
-- Branch: $BRANCH
-- Target: $TARGET
-
-EOF
-)
-
-if [ -n "$EXISTING_PR" ]; then
-  PR_REF="$EXISTING_PR"
-else
-  PR_URL=$(gh pr create \
-    --base "$TARGET" \
-    --head "$BRANCH" \
-    --title "$ISSUE_TITLE ($WORK)" \
-    --body "$PR_BODY" 2>/dev/null || true)
-
-  if [ -z "$PR_URL" ]; then
-    PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
-  fi
-  PR_REF="$BRANCH"
-fi
-```
-
-**3. Verify the pull request exists:**
-```bash
-PR_ERR=$(mktemp)
-PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$PR_REF" 2>"$PR_ERR")
-PR_STATUS=$?
-PR_ERROR=$(cat "$PR_ERR")
-rm -f "$PR_ERR"
-if [ "$PR_STATUS" -ne 0 ] || [ -z "$PR_INFO" ]; then
-  if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then
-    block_existing_pr "Existing PR $EXISTING_PR was not found or is not accessible."
-  fi
-  echo "Pull request $PR_REF was not found."
-  [ -n "$PR_ERROR" ] && echo "$PR_ERROR"
-  gc runtime drain-ack
-  exit 1
-fi
-PR_URL=$(printf '%s\n' "$PR_INFO" | jq -r '.url')
-PR_NUMBER=$(printf '%s\n' "$PR_INFO" | jq -r '.number')
-PR_STATE=$(printf '%s\n' "$PR_INFO" | jq -r '.state')
-PR_HEAD=$(printf '%s\n' "$PR_INFO" | jq -r '.headRefName')
-PR_BASE=$(printf '%s\n' "$PR_INFO" | jq -r '.baseRefName')
-PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')
-PR_HEAD_REPO=$(printf '%s\n' "$PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')
-echo "$PR_URL $PR_NUMBER $PR_STATE $PR_HEAD $PR_BASE $PR_REPO $PR_HEAD_REPO"
-if [ "$PR_STATE" != "OPEN" ]; then
-  if [ -n "$EXISTING_PR" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR is $PR_STATE, want OPEN."
-  fi
-  echo "Pull request $PR_REF is $PR_STATE, want OPEN."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ "$PR_HEAD" != "$BRANCH" ]; then
-  if [ -n "$EXISTING_PR" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR targets branch $PR_HEAD, want $BRANCH."
-  fi
-  echo "Pull request $PR_REF targets branch $PR_HEAD, want $BRANCH."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ "$PR_BASE" != "$TARGET" ]; then
-  if [ -n "$EXISTING_PR" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR targets base $PR_BASE, want $TARGET."
-  fi
-  echo "Pull request $PR_REF targets base $PR_BASE, want $TARGET."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ "$PR_REPO" != "$ORIGIN_REPO" ]; then
-  if [ -n "$EXISTING_PR" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO."
-  fi
-  echo "Pull request $PR_REF belongs to repo $PR_REPO, want $ORIGIN_REPO."
-  gc runtime drain-ack
-  exit 1
-fi
-if [ "$PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
-  if [ -n "$EXISTING_PR" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR head repo $PR_HEAD_REPO, want $ORIGIN_REPO."
-  fi
-  echo "Pull request $PR_REF head repo $PR_HEAD_REPO, want $ORIGIN_REPO."
-  gc runtime drain-ack
-  exit 1
-fi
-```
-If this command fails or prints empty output: STOP. Debug and retry. Do NOT continue.
-
-**4. Record PR metadata and close the work bead:**
-```bash
-gc bd update $WORK \
-  --set-metadata merge_result=pull_request \
-  --set-metadata pr_url="$PR_URL" \
-  --set-metadata pr_number="$PR_NUMBER" \
-  --set-metadata merged_target="$TARGET"
-gc bd close $WORK --reason "Pull request ready: $PR_URL"
-```
-
-**5. Cleanup:**
-```bash
-git checkout "$TARGET"
-git branch -d temp
-```
-Do NOT delete `$BRANCH` in mr mode — GitHub pull requests need the source branch.
-
-**If MERGE_STRATEGY = "local":**
-
-STOP. Local-only merge handoff is not implemented in the mmlac pack.
-Leave the work bead assigned to refinery and escalate to mayor for manual handling:
-```bash
-gc mail send mayor/ -s "ESCALATION: unsupported merge_strategy=local" -m "Work bead: $WORK
-Branch: $BRANCH
-Target: $TARGET
-The mmlac refinery supports direct and mr/pr merge strategies only."
-```
-Do NOT close the bead, delete the branch, or burn the wisp until a human decides how to proceed.
-
-**GATE**: direct mode requires verified target push. mr mode requires verified PR URL. Bead closure only happens after the selected handoff is confirmed."""
+**GATE**: bead closure requires BOTH a verified target push AND
+`git merge-base --is-ancestor temp origin/$TARGET`. A pull request never
+satisfies this gate, and neither does a grep match."""
 
 [[steps]]
 id = "patrol-summary"
