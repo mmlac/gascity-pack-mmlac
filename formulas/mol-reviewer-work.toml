@@ -304,7 +304,7 @@ pool.** Set `assignee=<refinery name>` here. The refinery's event
 watch listens for direct assignments to its session identity, and
 since the agent name resolves 1:1 to that session, the supervisor's
 Path 1 (`collectAssignedWorkBeadsWithStores`) sees this as demand and
-the agent's hook tier-2 (`bd ready --assignee=<my-id>`) matches.
+the agent's hook tier-2 (`gc bd ready --assignee=<my-id>`) matches.
 
 This is the OPPOSITE of the polecat→reviewer (pool) and reject→polecat
 (pool) handoffs, where the assignee MUST be empty because pool
@@ -323,7 +323,7 @@ the refinery uses them as-is.
 # stamp-worker-pool on first claim). Falls back to polecat-sonnet (the
 # default-tier variant) for beads that lack the stamp — e.g. manual
 # slings or replayed wisps that bypassed mol-polecat-work.
-POLECAT_TARGET=$(bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
+POLECAT_TARGET=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
 if [ -z "$POLECAT_TARGET" ]; then
     POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat-sonnet"
 fi

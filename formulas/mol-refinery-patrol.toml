@@ -153,7 +153,7 @@ Why the re-poll matters: a previous bug pattern (observed 2026-05-10) had
 the refinery interpreting event *content* and dismissing the wake-up when
 the payload didn't superficially match its work. A bead reassignment event
 slipped through and `au-quwk2` sat unprocessed for 46+ minutes. Always
-re-poll on every wake; the bd list cannot be missed by a cursor race.
+re-poll on every wake; the gc bd list cannot be missed by a cursor race.
 
 Why the payload filter: the watch was waking the refinery on every
 `order:gate-sweep` / `order:orphan-sweep` infra bead, which floods the
