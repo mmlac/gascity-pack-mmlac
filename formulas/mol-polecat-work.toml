@@ -104,28 +104,81 @@ git fetch --prune origin
 
 **2. Ensure worktree exists.**
 
-Check if `metadata.work_dir` already records your worktree path:
+⛔ **Provision with `gc worktree ensure`, never a bare `git worktree add`.**
+The controller refuses to launch a pool session for a bead whose work_dir lacks
+complete worktree provenance -- silently, by dropping the session from desired
+state every tick. It emits one stderr line and nothing else: no entry in
+`gc status`, `gc session list`, or events, so the bead looks exactly like an
+idle pool. Measured 2026-08-31: a bead carrying a bare work_dir got ZERO
+reviewer sessions in 10 minutes; the same bead with that value cleared got TWO
+within 30 seconds. Publishing the evidence below is what keeps your bead
+dispatchable after you hand it on.
+
+Check whether provenance is already published (canonical key first):
 ```bash
-WORKTREE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
+WORKTREE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata."gc.work_dir" // .[0].metadata.work_dir // empty')
 ```
 
-**If worktree path exists in metadata** — reuse it:
+**If the path exists and the directory is present** -- reuse it:
 ```bash
 cd "$WORKTREE"              # Enter existing worktree
 ```
 If the directory is missing (witness cleaned it, disk issue), fall through
 to create a new one.
 
-**If no worktree** — create one scoped to the bead, not the agent:
+**If no worktree** -- provision one scoped to the bead, not the agent.
+
+Resolve the branch BEFORE provisioning: `gc worktree ensure` binds the branch
+into the durable identity, so it cannot be a detached checkout you name later.
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
-git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
+BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+[ -n "$BRANCH" ] || BRANCH="polecat/{{issue}}"
+
+REPO=$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')
+WORKTREE_ROOT=$(pwd)/worktrees
+WORKTREE_PATH=$WORKTREE_ROOT/{{issue}}
+BASE_REF=origin/{{base_branch}}
+BASE_SHA=$(git rev-parse "$BASE_REF")
+RIG=$(pwd | awk -F'/.gc/worktrees/' '{print $2}' | cut -d/ -f1)
+OWNER=$(gc runtime session-name 2>/dev/null || echo "${USER:-polecat}")
+GENERATION=$(date -u +%Y%m%dT%H%M%SZ)
+```
+```bash
+REPORT=$(gc worktree ensure --json --repo "$REPO" --root "$WORKTREE_ROOT" --path "$WORKTREE_PATH" --branch "$BRANCH" --base "$BASE_REF" --base-sha "$BASE_SHA" --bead {{issue}} --store-ref "rig:$RIG" --creator mol-polecat-work --owner "$OWNER" --generation "$GENERATION" --lifecycle active)
+if [ $? -ne 0 ]; then
+    echo "gc worktree ensure failed. STOP -- do NOT fall back to git worktree add."
+    echo "A bare git worktree add publishes no provenance and strands this bead."
+    gc runtime drain-ack
+    exit 1
+fi
 cd "$WORKTREE_PATH"
 ```
-Record immediately so restarts and witness recovery can find it:
+
+Publish the evidence immediately. The command RETURNS provenance but does
+**not** write it to the bead -- that is the caller's job, and skipping it is
+the whole defect this replaced:
 ```bash
-gc bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+pv() { printf '%s' "$REPORT" | jq -r ".provenance.$1"; }
+
+gc bd update {{issue}} --set-metadata gc.work_dir="$(pv path)" --set-metadata gc.worktree_repo="$(pv repo_identity)" --set-metadata gc.worktree_root="$WORKTREE_ROOT" --set-metadata gc.work_branch="$(pv branch)" --set-metadata gc.worktree_base_ref="$(pv base_ref)" --set-metadata gc.worktree_base_sha="$(pv base_sha)" --set-metadata gc.worktree_creator="$(pv creator)" --set-metadata gc.worktree_owner="$(pv owner)" --set-metadata gc.worktree_generation="$(pv generation)" --set-metadata gc.worktree_lifecycle="$(pv lifecycle)"
 ```
+
+⚠ `gc.worktree_root` is stamped from the value you PASSED as `--root`. It is
+deliberately not echoed back in the provenance JSON, so it cannot be read out
+of `$REPORT`.
+
+⛔ Then clear any legacy `work_dir`. Canonical `gc.work_dir` and legacy
+`work_dir` both set but DIFFERENT is its own hard refusal -- a separate trip
+condition from missing keys, and one a reused worktree hits easily:
+```bash
+gc bd update {{issue}} --unset-metadata work_dir
+```
+
+Verify before moving on. Nine non-empty keys, or the bead is undispatchable:
+```bash
+gc bd show {{issue}} --json | jq -r '.[0].metadata as $m | ["gc.worktree_repo","gc.worktree_root","gc.work_branch","gc.worktree_base_ref","gc.worktree_base_sha","gc.worktree_creator","gc.worktree_owner","gc.worktree_generation","gc.worktree_lifecycle"] | map(select(($m[.] // "") == "")) as $missing | if ($missing | length) == 0 then "provenance OK" else "MISSING: " + ($missing | join(", ")) end'
+```
+Do not proceed on anything but `provenance OK`.
 
 Worktrees are scoped to the work bead (not the agent name) so that:
 - An agent can pick up new work even if an old worktree is being recovered
