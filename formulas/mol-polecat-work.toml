@@ -222,9 +222,50 @@ git status                  # Should be clean
 ```
 Empty setup_command → skip.
 
+**6. Bring up any service the test suite needs.**
+
+**A skipped test is not a passing test.** A suite that silently skips
+because a dependency is absent reports success while proving nothing, and
+`ok  <pkg>` in the output looks identical either way. If the tests you are
+about to rely on skip for a missing service, and that service can be run
+here, run it — then re-check that the tests actually EXECUTED, not merely
+that the package exited 0.
+
+**Postgres is available in this environment.** `psql`, `pg_isready` and
+`docker` are all absent, which makes it look like it is not — the missing
+CLIENT is not evidence of a missing SERVER. Binaries (server-side only):
+
+```bash
+export LC_ALL=C LANG=C        # initdb fails "invalid locale settings" without this
+PGBIN=/home/agent/.embedded-pg/bin-pg16/bin   # initdb, pg_ctl, postgres
+PGDATA=$(pwd)/.pgdata; PGPORT=$((54300 + RANDOM % 200))
+"$PGBIN/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8
+"$PGBIN/pg_ctl" -D "$PGDATA" \
+    -o "-p $PGPORT -k /tmp -c listen_addresses=127.0.0.1" -l "$PGDATA/pg.log" -w start
+export DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/postgres?sslmode=disable"
+```
+
+Pick a random port — several polecats may run concurrently. Put `$PGDATA`
+inside your worktree so witness cleanup reclaims it, and stop the server in
+the submit step (`pg_ctl -D "$PGDATA" stop`) so you do not leak a process.
+There is no `psql`; query through a throwaway Go/Python program using the
+repo's own driver, or just run the suite.
+
+**If your change is a database MIGRATION, verify on TWO databases.** They
+answer different questions and one alone will mislead you:
+
+1. The repo's migration round-trip tests. These walk the migrator DOWN past
+   your migration, which is the only way a broken `Down` surfaces — and a
+   broken `Down` fails every unrelated round-trip test in the package, so
+   the damage is never confined to your own feature.
+2. A FRESH cluster, migrate-up only, then read the rows back. This is what a
+   newly provisioned environment actually gets. A database that has run the
+   test suite is polluted by fixtures, and rows it shows you may have been
+   written by a test rather than by your migration.
+
 **Exit criteria:** In your worktree, on a clean feature branch, rebased
-on latest {{base_branch}}, deps installed, worktree and branch recorded
-on the bead."""
+on latest {{base_branch}}, deps installed, any service the suite needs
+running, worktree and branch recorded on the bead."""
 
 [[steps]]
 id = "submit-and-exit"
@@ -244,6 +285,14 @@ git add -A && git commit -m "chore: capture remaining work ({{issue}})"
 ```
 This is a belt-and-suspenders check — self-review should have caught this,
 but we never push with untracked work left behind.
+
+If you started a service in workspace-setup step 6, stop it now and make
+sure its data directory is not what you are about to commit:
+```bash
+[ -d "$PGDATA" ] && "$PGBIN/pg_ctl" -D "$PGDATA" stop -m fast && rm -rf "$PGDATA"
+```
+A left-running server leaks a process past your own lifetime; a committed
+data directory is hundreds of megabytes of binary noise in the diff.
 
 **2. Push your branch:**
 ```bash
