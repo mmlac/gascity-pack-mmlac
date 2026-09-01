@@ -114,19 +114,13 @@ reviewer sessions in 10 minutes; the same bead with that value cleared got TWO
 within 30 seconds. Publishing the evidence below is what keeps your bead
 dispatchable after you hand it on.
 
-Check whether provenance is already published (canonical key first):
-```bash
-WORKTREE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata."gc.work_dir" // .[0].metadata.work_dir // empty')
-```
-
-**If the path exists and the directory is present** -- reuse it:
-```bash
-cd "$WORKTREE"              # Enter existing worktree
-```
-If the directory is missing (witness cleaned it, disk issue), fall through
-to create a new one.
-
-**If no worktree** -- provision one scoped to the bead, not the agent.
+⛔ **Run this whether or not a worktree already exists.** `gc worktree ensure`
+is idempotent, so there is deliberately NO separate create-vs-reuse path here.
+An earlier version of this step only published provenance when it CREATED a
+worktree; a bead that already had a work_dir took a bare `cd "$WORKTREE"` and
+published nothing, so the missing keys were never backfilled and the bad shape
+survived every rework round. ex-bd9lhd.3.5 re-acquired it on round 3 that way.
+Reuse must republish.
 
 Resolve the branch BEFORE provisioning: `gc worktree ensure` binds the branch
 into the durable identity, so it cannot be a detached checkout you name later.
@@ -136,7 +130,15 @@ BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
 
 REPO=$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')
 WORKTREE_ROOT=$(pwd)/worktrees
-WORKTREE_PATH=$WORKTREE_ROOT/{{issue}}
+# Honour a path already recorded on the bead (witness recovery, or a prior
+# round) so reuse ensures the SAME directory rather than silently relocating.
+RECORDED=$(gc bd show {{issue}} --json | jq -r '.[0].metadata."gc.work_dir" // .[0].metadata.work_dir // empty')
+if [ -n "$RECORDED" ]; then
+    WORKTREE_PATH=$RECORDED
+    WORKTREE_ROOT=$(dirname "$RECORDED")
+else
+    WORKTREE_PATH=$WORKTREE_ROOT/{{issue}}
+fi
 BASE_REF=origin/{{base_branch}}
 BASE_SHA=$(git rev-parse "$BASE_REF")
 RIG=$(pwd | awk -F'/.gc/worktrees/' '{print $2}' | cut -d/ -f1)
