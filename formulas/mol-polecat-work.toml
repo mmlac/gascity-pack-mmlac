@@ -349,6 +349,27 @@ sure its data directory is not what you are about to commit:
 A left-running server leaks a process past your own lifetime; a committed
 data directory is hundreds of megabytes of binary noise in the diff.
 
+⛔ **Keep PGDATA inside your own worktree, and never clean up with a wildcard
+against a shared directory.** `$(pwd)/.pgdata` above is deliberate: it is yours
+alone, and `rm -rf "$PGDATA"` names exactly one path you own.
+
+2026-09-01: a polecat improvised its scratch clusters under `/tmp` instead and
+tore them down with `rm -rf /tmp/tmp.*/pg`. The glob also matched a SIBLING
+polecat's live cluster and deleted it out from under a running postgres
+(pid 9304, port 55471) while that agent was mid-test. Only a throwaway test
+database was lost -- the sibling's committed work was already pushed -- but
+nothing about the command made that outcome lucky rather than catastrophic.
+
+`/tmp` is shared by every agent in the city. A path shape you believe is
+exclusively yours is not: `tmp.*` is exactly the shape `mktemp -d` hands to
+everybody. If you ever do need a temp directory outside your worktree, keep the
+handle `mktemp -d` returned and remove THAT variable -- never a pattern.
+
+The polecat that did this self-reported it immediately and did not try to
+"repair" the sibling by restarting or killing anything, which was the right
+call: an unprompted fix on another agent's process compounds the damage. Report
+and let the owner recover.
+
 **2. Push your branch:**
 ```bash
 git push origin HEAD
