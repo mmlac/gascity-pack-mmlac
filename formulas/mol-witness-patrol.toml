@@ -524,12 +524,22 @@ beads are moved, they reach the fallback pool's hook on the next cycle.
 **Resolve rig:**
 ```bash
 RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+# ⛔ Agent names carry the PACK PREFIX. In the mmlac pack the reviewer is
+# "$RIG/mmlac.reviewer", NOT "$RIG/reviewer". Every comparison below used the
+# unprefixed form and therefore matched NOTHING: the step found zero live
+# reviewers every cycle and could never detect blockage or re-route. Worse, the
+# re-route TARGET was also unprefixed, so had it ever fired it would have routed
+# beads to an agent that does not exist.
+# Derive the prefix from this patrol's OWN alias, which is the pack's naming
+# convention by construction, and is empty in a pack-less city.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
+REVIEWER="$RIG/${PREFIX}reviewer"
+FALLBACK="$RIG/${PREFIX}reviewer-fallback"
 ```
 
 **Step 1: Find live reviewer sessions in this rig.**
 ```bash
-REVIEWERS=$(gc session list --json --state=active 2>/dev/null \
-  | jq -r --arg rig "$RIG" '.[] | select(.Template == ($rig + "/reviewer")) | .ID')
+REVIEWERS=$(gc session list --json --state=active 2>/dev/null | jq -r --arg rev "$REVIEWER" '.[] | select(.Template == $rev) | .ID')
 ```
 
 If `$REVIEWERS` is empty, there is nothing to check — skip the rest of
@@ -566,14 +576,11 @@ don't pre-emptively re-route.
 if [ "$TOTAL" -gt 0 ] && [ "$QUOTA_BLOCKED_COUNT" -eq "$TOTAL" ]; then
   echo "WITNESS: entire reviewer pool ($TOTAL/$TOTAL) is quota-blocked; routing to reviewer-fallback"
   TO_REROUTE=$(gc bd list --status=open --json --limit=0 \
-    | jq -r --arg rig "$RIG" '.[]
-        | select(.metadata."gc.routed_to" == ($rig + "/reviewer"))
-        | .id')
+    | jq -r --arg rev "$REVIEWER" '.[] | select(.metadata."gc.routed_to" == $rev) | .id')
   for BEAD in $TO_REROUTE; do
     gc bd update "$BEAD" \
-      --set-metadata "gc.routed_to=$RIG/reviewer-fallback" \
-      --append-notes "Witness re-route: primary reviewer pool quota-blocked. Forwarded to ${RIG}/reviewer-fallback."
-    echo "WITNESS: re-routed $BEAD → $RIG/reviewer-fallback"
+      --set-metadata "gc.routed_to=$FALLBACK" --append-notes "Witness re-route: primary reviewer pool quota-blocked. Forwarded to $FALLBACK."
+    echo "WITNESS: re-routed $BEAD → $FALLBACK"
   done
 
   # Tell mayor so they can decide on provider-config follow-up.
