@@ -56,7 +56,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 10
+version = 11
 
 [vars]
 [vars.event_timeout]
@@ -183,11 +183,24 @@ a NEW session with a different ID — the old one never comes back.
          }}
          end;
 
-       (reduce $sessions[] as $s ({};
-         add(.; $s.ID; $s.State; ($s.Closed // false))
-         | add(.; $s.SessionName; $s.State; ($s.Closed // false))
-         | add(.; $s.Alias; $s.State; ($s.Closed // false))
-         | add(.; $s.AgentName; $s.State; ($s.Closed // false))
+       # ⛔ `gc session list --json` returns {sessions:[...], ok, filters, summary},
+       # NOT a bare array, and its fields are lowercase (id/state/closed/
+       # session_name/alias/agent_name), not capitalized. The original
+       # `$sessions[] ... $s.ID` form iterated the wrapper OBJECT's values,
+       # hit the boolean `ok` field, and threw a fatal jq error ("Cannot index
+       # boolean with string") on every single invocation.
+       # `MATCH_JSON=$(...)` silently swallowed that into an EMPTY string, which
+       # step 2 below then reads as STATE=absent for every assignee looked up —
+       # meaning every live, actively-working polecat was misclassified as
+       # orphaned by this step as written. Confirmed by direct reproduction
+       # against live `gc session list --state=all --json` output (witness
+       # patrol, 2026-09-01). Fixed by indexing `.sessions[]` and the real
+       # lowercase field names.
+       (reduce $sessions.sessions[] as $s ({};
+         add(.; $s.id; $s.state; ($s.closed // false))
+         | add(.; $s.session_name; $s.state; ($s.closed // false))
+         | add(.; $s.alias; $s.state; ($s.closed // false))
+         | add(.; $s.agent_name; $s.state; ($s.closed // false))
        )) as $from_session_list
        | reduce $session_beads[] as $b ($from_session_list;
            add(.; $b.metadata.configured_named_identity; $b.metadata.state; ($b.status == "closed")))
@@ -545,7 +558,12 @@ FALLBACK="$RIG/${PREFIX}reviewer-fallback"
 
 **Step 1: Find live reviewer sessions in this rig.**
 ```bash
-REVIEWERS=$(gc session list --json --state=active 2>/dev/null | jq -r --arg rev "$REVIEWER" '.[] | select(.Template == $rev) | .ID')
+# ⛔ `gc session list --json` returns {sessions:[...]}, not a bare array, with
+# lowercase fields (id/template), not capitalized (ID/Template) — the original
+# form threw a fatal jq error on every run ("Cannot index boolean with string"),
+# so REVIEWERS was always empty regardless of real pool state. Confirmed by
+# direct reproduction (witness patrol, 2026-09-01). Fixed below.
+REVIEWERS=$(gc session list --json --state=active 2>/dev/null | jq -r --arg rev "$REVIEWER" '.sessions[] | select(.template == $rev) | .id')
 ```
 
 If `$REVIEWERS` is empty, there is nothing to check — skip the rest of
