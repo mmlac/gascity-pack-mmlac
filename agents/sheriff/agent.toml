@@ -1,0 +1,29 @@
+# The Sheriff — the owner's on-demand deputy.
+#
+# City-scoped like the mayor, so it sees every rig and the whole bead graph.
+# Unlike the mayor it is NOT a drive shaft: it runs no patrol, claims no pool
+# work, and dispatches nothing unless the owner asks. It exists to be summoned.
+#
+# ⚠ max_active_sessions = 1 is load-bearing. Two sheriffs would race each
+# other on the owner's request and could double-dispatch the same bead.
+#
+# ⚠ It deliberately does NOT include the "propulsion-mayor" prompt fragment.
+# That fragment tells an agent it is the main drive shaft and must EXECUTE
+# whatever is on its hook immediately, without waiting. Applied to a second
+# city-scoped coordinator that would mean racing the mayor for the same work.
+# The sheriff's prompt inverts it on purpose: wait for the owner.
+scope = "city"
+provider = "claude"
+wake_mode = "fresh"
+work_dir = ".gc/agents/sheriff"
+
+# Deliberately NOT "check hook and act". The mayor's nudge sends it hunting for
+# work; this one must land the session in a ready-and-waiting state instead.
+nudge = "Orient with 'gc prime', report readiness in one line, then WAIT for the owner. Do not claim pool work and do not dispatch anything unless asked."
+
+idle_timeout = "1h"
+max_active_sessions = 1
+
+[option_defaults]
+model = "opus"
+effort = "max"

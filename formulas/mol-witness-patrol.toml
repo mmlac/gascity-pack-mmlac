@@ -56,7 +56,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 10
+version = 11
 
 [vars]
 [vars.event_timeout]
@@ -183,11 +183,24 @@ a NEW session with a different ID — the old one never comes back.
          }}
          end;
 
-       (reduce $sessions[] as $s ({};
-         add(.; $s.ID; $s.State; ($s.Closed // false))
-         | add(.; $s.SessionName; $s.State; ($s.Closed // false))
-         | add(.; $s.Alias; $s.State; ($s.Closed // false))
-         | add(.; $s.AgentName; $s.State; ($s.Closed // false))
+       # ⛔ `gc session list --json` returns {sessions:[...], ok, filters, summary},
+       # NOT a bare array, and its fields are lowercase (id/state/closed/
+       # session_name/alias/agent_name), not capitalized. The original
+       # `$sessions[] ... $s.ID` form iterated the wrapper OBJECT's values,
+       # hit the boolean `ok` field, and threw a fatal jq error ("Cannot index
+       # boolean with string") on every single invocation.
+       # `MATCH_JSON=$(...)` silently swallowed that into an EMPTY string, which
+       # step 2 below then reads as STATE=absent for every assignee looked up —
+       # meaning every live, actively-working polecat was misclassified as
+       # orphaned by this step as written. Confirmed by direct reproduction
+       # against live `gc session list --state=all --json` output (witness
+       # patrol, 2026-09-01). Fixed by indexing `.sessions[]` and the real
+       # lowercase field names.
+       (reduce $sessions.sessions[] as $s ({};
+         add(.; $s.id; $s.state; ($s.closed // false))
+         | add(.; $s.session_name; $s.state; ($s.closed // false))
+         | add(.; $s.alias; $s.state; ($s.closed // false))
+         | add(.; $s.agent_name; $s.state; ($s.closed // false))
        )) as $from_session_list
        | reduce $session_beads[] as $b ($from_session_list;
            add(.; $b.metadata.configured_named_identity; $b.metadata.state; ($b.status == "closed")))
@@ -371,6 +384,10 @@ which is exactly how a wedged-thinking refinery slips by.
 **Resolve your rig once at the top of the step:**
 ```bash
 RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+# Agent names carry the pack prefix (ExecCoreAI/mmlac.refinery), derived here
+# from this patrol's OWN alias so it is empty in a pack-less city.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
+REFINERY="$RIG/${PREFIX}refinery"
 NOW_EPOCH=$(date +%s)
 NOW_RFC3339=$(date -u +%FT%TZ)
 ```
@@ -421,10 +438,7 @@ echo "$RF_QUEUE" | jq -c --argjson now "$NOW_EPOCH" '
         -s "REFINERY_STUCK: $ID still queued ${AGE}m after nudge" \
         -m "Bead $ID assigned to $RIG/refinery, review_status=$REVIEW, age ${AGE}m.
 Prior nudge at $PRIOR. Filing dog warrant. Recommend manual reset of refinery session if pattern repeats."
-      gc bd create --type=warrant \
-        --title="Stuck: $RIG/refinery (queue blocked on $ID)" \
-        --metadata "{\"target\":\"$RIG/refinery\",\"reason\":\"Refinery did not act on nudge for $ID; age ${AGE}m, review_status=$REVIEW\",\"requester\":\"witness\"}" \
-        --label=pool:dog
+      gc bd create --type=task --label=warrant --title="Stuck: $REFINERY (queue blocked on $ID)" --metadata "{\"target\":\"$REFINERY\",\"reason\":\"Refinery did not act on nudge for $ID; age ${AGE}m, review_status=$REVIEW\",\"requester\":\"witness\",\"gc.routed_to\":\"${PREFIX}dog\"}"
       echo "WITNESS: tier2 escalation for $ID (age ${AGE}m, review=$REVIEW)"
     fi
   done
@@ -457,6 +471,10 @@ multiple instances (`reviewer-1` … `reviewer-N`); the assignee will be
 **Resolve rig and time:**
 ```bash
 RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+# Agent names carry the pack prefix (ExecCoreAI/mmlac.refinery), derived here
+# from this patrol's OWN alias so it is empty in a pack-less city.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
+REFINERY="$RIG/${PREFIX}refinery"
 NOW_EPOCH=$(date +%s)
 NOW_RFC3339=$(date -u +%FT%TZ)
 ```
@@ -464,7 +482,7 @@ NOW_RFC3339=$(date -u +%FT%TZ)
 **Step 1: List work beads queued at any reviewer in this rig:**
 ```bash
 REV_QUEUE=$(gc bd list --status=open --json --limit=0 \
-  | jq --arg rig "$RIG" '[.[] | select(.assignee // "" | startswith($rig + "/reviewer"))]')
+  | jq --arg a "$RIG/$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')reviewer" '[.[] | select(.assignee // "" | startswith($a))]')
 ```
 
 **Step 2: Apply staleness threshold and tier ladder:**
@@ -494,10 +512,7 @@ echo "$REV_QUEUE" | jq -c --argjson now "$NOW_EPOCH" '
       gc mail send mayor/ \
         -s "REVIEWER_STUCK: $ID still queued ${AGE}m after nudge" \
         -m "Bead $ID assigned to $ASSIGNEE, age ${AGE}m. Prior nudge at $PRIOR. Filing dog warrant."
-      gc bd create --type=warrant \
-        --title="Stuck: $ASSIGNEE (queue blocked on $ID)" \
-        --metadata "{\"target\":\"$ASSIGNEE\",\"reason\":\"Reviewer did not act on nudge for $ID; age ${AGE}m\",\"requester\":\"witness\"}" \
-        --label=pool:dog
+      gc bd create --type=task --label=warrant --title="Stuck: $ASSIGNEE (queue blocked on $ID)" --metadata "{\"target\":\"$ASSIGNEE\",\"reason\":\"Reviewer did not act on nudge for $ID; age ${AGE}m\",\"requester\":\"witness\",\"gc.routed_to\":\"${PREFIX}dog\"}"
       echo "WITNESS: tier2 reviewer escalation for $ID → $ASSIGNEE (age ${AGE}m)"
     fi
   done
@@ -524,12 +539,31 @@ beads are moved, they reach the fallback pool's hook on the next cycle.
 **Resolve rig:**
 ```bash
 RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+# Agent names carry the pack prefix (ExecCoreAI/mmlac.refinery), derived here
+# from this patrol's OWN alias so it is empty in a pack-less city.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
+REFINERY="$RIG/${PREFIX}refinery"
+# ⛔ Agent names carry the PACK PREFIX. In the mmlac pack the reviewer is
+# "$RIG/mmlac.reviewer", NOT "$RIG/reviewer". Every comparison below used the
+# unprefixed form and therefore matched NOTHING: the step found zero live
+# reviewers every cycle and could never detect blockage or re-route. Worse, the
+# re-route TARGET was also unprefixed, so had it ever fired it would have routed
+# beads to an agent that does not exist.
+# Derive the prefix from this patrol's OWN alias, which is the pack's naming
+# convention by construction, and is empty in a pack-less city.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
+REVIEWER="$RIG/${PREFIX}reviewer"
+FALLBACK="$RIG/${PREFIX}reviewer-fallback"
 ```
 
 **Step 1: Find live reviewer sessions in this rig.**
 ```bash
-REVIEWERS=$(gc session list --json --state=active 2>/dev/null \
-  | jq -r --arg rig "$RIG" '.[] | select(.Template == ($rig + "/reviewer")) | .ID')
+# ⛔ `gc session list --json` returns {sessions:[...]}, not a bare array, with
+# lowercase fields (id/template), not capitalized (ID/Template) — the original
+# form threw a fatal jq error on every run ("Cannot index boolean with string"),
+# so REVIEWERS was always empty regardless of real pool state. Confirmed by
+# direct reproduction (witness patrol, 2026-09-01). Fixed below.
+REVIEWERS=$(gc session list --json --state=active 2>/dev/null | jq -r --arg rev "$REVIEWER" '.sessions[] | select(.template == $rev) | .id')
 ```
 
 If `$REVIEWERS` is empty, there is nothing to check — skip the rest of
@@ -566,14 +600,11 @@ don't pre-emptively re-route.
 if [ "$TOTAL" -gt 0 ] && [ "$QUOTA_BLOCKED_COUNT" -eq "$TOTAL" ]; then
   echo "WITNESS: entire reviewer pool ($TOTAL/$TOTAL) is quota-blocked; routing to reviewer-fallback"
   TO_REROUTE=$(gc bd list --status=open --json --limit=0 \
-    | jq -r --arg rig "$RIG" '.[]
-        | select(.metadata."gc.routed_to" == ($rig + "/reviewer"))
-        | .id')
+    | jq -r --arg rev "$REVIEWER" '.[] | select(.metadata."gc.routed_to" == $rev) | .id')
   for BEAD in $TO_REROUTE; do
     gc bd update "$BEAD" \
-      --set-metadata "gc.routed_to=$RIG/reviewer-fallback" \
-      --append-notes "Witness re-route: primary reviewer pool quota-blocked. Forwarded to ${RIG}/reviewer-fallback."
-    echo "WITNESS: re-routed $BEAD → $RIG/reviewer-fallback"
+      --set-metadata "gc.routed_to=$FALLBACK" --append-notes "Witness re-route: primary reviewer pool quota-blocked. Forwarded to $FALLBACK."
+    echo "WITNESS: re-routed $BEAD → $FALLBACK"
   done
 
   # Tell mayor so they can decide on provider-config follow-up.
@@ -633,11 +664,24 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-gc bd create --type=warrant \
-  --title="Stuck: <agent>" \
-  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
-  --label=pool:dog
+gc bd create --type=task --label=warrant --title="Stuck: <agent>" --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness","gc.routed_to":"<binding-prefix>dog"}'
 ```
+
+⛔ `--type=warrant` DOES NOT WORK and never has: "warrant" is not a configured
+custom issue type in any rig, so `gc bd create --type=warrant` fails outright
+with `invalid issue type: warrant` and NO warrant is filed. Nor does
+`--label=pool:dog` route anything -- routing is `gc.routed_to` in metadata, and
+label-based pool exclusion does not exist at all (gc-nofzw3).
+
+The form above is the convention `mol-shutdown-dance` documents in its own
+source, and it is verified working: the witness filed ex-yp2pn5 with it while
+the documented form was failing silently in the same cycle.
+
+⚠ Consequence worth knowing: every witness in every rig that reached this step
+as previously written failed identically, so stuck-agent warrants were very
+likely never being filed from patrol at all. That is a second, independent
+reason wedge warrants never got actioned -- the first being the dog pool scaled
+to zero.
 
 The dog pool picks up the warrant and runs `mol-shutdown-dance`, which
 gives the polecat 3 chances to prove it's alive before killing it.
@@ -668,18 +712,28 @@ here; if a step was skipped, you would have no count to copy anyway.
 
 ```bash
 RIG="${GC_RIG:-$(echo "$GC_ALIAS" | cut -d/ -f1)}"
+# Agent names carry the pack prefix (ExecCoreAI/mmlac.refinery), derived here
+# from this patrol's OWN alias so it is empty in a pack-less city.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
+REFINERY="$RIG/${PREFIX}refinery"
 
 ALL_OPEN=$(gc bd list --status=open --json --limit=0)
 IN_PROGRESS=$(gc bd list --status=in_progress --json --limit=0)
 
-REFINERY_COUNT=$(echo "$ALL_OPEN" | jq --arg rig "$RIG" '
-  [.[] | select(.assignee == "\($rig)/refinery")] | length')
+# Agent names carry the PACK PREFIX (e.g. ExecCoreAI/mmlac.refinery), and
+# polecats use NAMED identities (ExecCoreAI/mmlac.aristotle) rather than a
+# literal "polecat" string. Matching the unprefixed/template-literal forms made
+# every count below read 0 regardless of real state.
+PREFIX=$(echo "$GC_ALIAS" | cut -d/ -f2 | sed 's/[^.]*$//')
 
-REVIEWER_COUNT=$(echo "$ALL_OPEN" | jq --arg rig "$RIG" '
-  [.[] | select(.assignee // "" | startswith("\($rig)/reviewer"))] | length')
+REFINERY_COUNT=$(echo "$ALL_OPEN" | jq --arg a "$RIG/${PREFIX}refinery" '[.[] | select(.assignee == $a)] | length')
 
-POLECAT_IN_PROGRESS=$(echo "$IN_PROGRESS" | jq '
-  [.[] | select(.assignee // "" | test("polecat|polecat-"))] | length')
+REVIEWER_COUNT=$(echo "$ALL_OPEN" | jq --arg a "$RIG/${PREFIX}reviewer" '[.[] | select(.assignee // "" | startswith($a))] | length')
+
+# A polecat is any in-rig assignee that is not one of the named infrastructure
+# agents -- derived by exclusion, because polecat identities come from a
+# namepool and cannot be matched by a literal.
+POLECAT_IN_PROGRESS=$(echo "$IN_PROGRESS" | jq --arg rig "$RIG/" --arg pfx "$PREFIX" '[.[] | select((.assignee // "") | startswith($rig) and (test("(refinery|reviewer|witness|deacon|mayor|dog)$") | not))] | length')
 
 ASSIGNED_OPEN=$(echo "$ALL_OPEN" | jq '
   [.[] | select((.assignee // "") != "")] | length')

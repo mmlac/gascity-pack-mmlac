@@ -19,6 +19,7 @@ polecat fixes.
 
 **No MR beads.** Work beads flow:
 pool → polecat → reviewer → refinery → closed
+                            ↑ YOU     ↑ closes it, not you
                        ↑________↓ (rejection on findings)
 
 The reviewer reads `metadata.branch` and `metadata.target` set by the
@@ -239,7 +240,8 @@ needs = ["review"]
 description = """
 Persist the FULL report into the bead notes. The notes are the durable
 record — the polecat reads them on rejection, and the capability ledger
-records them on close.
+records them when the REFINERY eventually closes the bead after merging.
+(That closure is not yours to perform; see the hand-off step.)
 
 ```bash
 gc bd update {{issue}} --notes "$(cat <<'EOF'
@@ -290,6 +292,14 @@ needs = ["write-report"]
 description = """
 Hand off the bead and self-clean. You cease to exist after this step.
 
+⛔ YOU DO NOT CLOSE THE WORK BEAD — not on pass, not on findings. Closing is the
+REFINERY's act, and only after it has merged. Your last act is to ROUTE: leave
+`status=open`, assigned onward. This has been done wrong SEVEN times by FIVE
+different reviewers; each time the review was correct and the work was lost
+anyway, because a closed bead reads as SUCCESS everywhere and the refinery's
+orphan scan filters `--status=open` so it cannot see one. "You cease to exist"
+means your SESSION ends, not that the bead is finished.
+
 **On pass (no `block` findings):**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
@@ -297,6 +307,7 @@ gc bd update {{issue}} \
   --set-metadata review_status=pass \
   --set-metadata gc.routed_to="$REFINERY_TARGET"
 gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET"
+# ⛔ There is no `gc bd close` here, and there must not be. status STAYS open.
 ```
 
 **Refinery is a single named agent (max_active_sessions=1), not a
@@ -304,7 +315,7 @@ pool.** Set `assignee=<refinery name>` here. The refinery's event
 watch listens for direct assignments to its session identity, and
 since the agent name resolves 1:1 to that session, the supervisor's
 Path 1 (`collectAssignedWorkBeadsWithStores`) sees this as demand and
-the agent's hook tier-2 (`bd ready --assignee=<my-id>`) matches.
+the agent's hook tier-2 (`gc bd ready --assignee=<my-id>`) matches.
 
 This is the OPPOSITE of the polecat→reviewer (pool) and reject→polecat
 (pool) handoffs, where the assignee MUST be empty because pool
@@ -323,7 +334,7 @@ the refinery uses them as-is.
 # stamp-worker-pool on first claim). Falls back to polecat-sonnet (the
 # default-tier variant) for beads that lack the stamp — e.g. manual
 # slings or replayed wisps that bypassed mol-polecat-work.
-POLECAT_TARGET=$(bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
+POLECAT_TARGET=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
 if [ -z "$POLECAT_TARGET" ]; then
     POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat-sonnet"
 fi

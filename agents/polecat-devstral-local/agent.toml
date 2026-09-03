@@ -1,0 +1,37 @@
+# polecat-devstral-local — local-model polecat on the OpenCode harness, pinned
+# to devstral-polecat:latest (baked devstral:24b-small-2505-q8_0 variant, ~25GB,
+# num_ctx 64k + OpenHands system prompt) served by ollama on the macOS host.
+# Faster to load than the 122B qwen; good for the bulk of local coding work.
+#
+# Model selection: the provider "devstral-local" (city.toml) sets
+# OPENCODE_CONFIG_CONTENT to pin ollama/devstral-polecat:latest. gascity
+# has no model option-schema for opencode and its ACP session/new passes no
+# model, so the model is chosen in opencode's own config and overridden
+# per-provider by that env. The ollama provider + model catalog live in
+# ~/.config/opencode/opencode.jsonc.
+#
+# Persona pool is rivers — disjoint from polecat-sonnet (philosophers),
+# polecat-opus (Mad Max), polecat-haiku (rock bands) and polecat-qwen-local
+# (constellations) so no two pools share a persona name (shared names collapse
+# to the same worktree path → sibling-branch contamination).
+#
+# max_active_sessions = 1: ollama serializes inference and a 25GB model plus
+# whatever else is loaded saturates the Mac's memory; concurrent sessions would
+# queue and thrash. Keep the local pool to one worker at a time.
+#
+# Routing in:  gc sling <rig>/polecat-devstral-local <bead>
+# Routing out (on review/refinery rejection): preserved via the `worker_pool`
+# metadata stamp set by mol-polecat-work stamp-worker-pool.
+
+scope = "rig"
+provider = "devstral-local"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.Agent}}/{{.AgentBase}}"
+prompt_template = "/gc/packs/mmlac/shared/polecat/prompt-local.template.md"
+namepool = "/gc/packs/mmlac/shared/polecat/namepool-devstral-local.txt"
+nudge = "Run gc hook --claim --json to TAKE your next work item and begin it immediately. It checks assigned work first, then routed pool work. Plain 'gc hook' only READS and does not claim -- reading it and stopping leaves the work unowned and the wave stalled."
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 1
+default_sling_formula = "mol-polecat-work-local"

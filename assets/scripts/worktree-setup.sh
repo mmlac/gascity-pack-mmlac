@@ -248,7 +248,11 @@ append_exclude ".github/hooks/"
 append_exclude ".github/copilot-instructions.md"
 append_exclude "state.json"
 
-# Optional sync.
-sync_worktree
+# Optional sync: intentionally NOT performed on the freshly-created path.
+# The worktree was just created from origin/<default>, and restore_stage has
+# already run above -- a reset here would destroy the restored stage. The
+# reuse path does its own --sync via refresh_existing_worktree (line ~97).
+# (Was: a call to sync_worktree, a function that has never existed, which
+# made this script exit 127 on every NEW worktree and aborted agent startup.)
 
 exit 0

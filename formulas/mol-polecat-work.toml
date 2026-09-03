@@ -64,11 +64,11 @@ now, before that overwrite, so it survives the round-trip.
 
 **Stamp:**
 ```bash
-EXISTING_POOL=$(bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
+EXISTING_POOL=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.worker_pool // empty')
 if [ -z "$EXISTING_POOL" ]; then
-    ROUTED=$(bd show {{issue}} --json | jq -r '.[0].metadata["gc.routed_to"] // empty')
+    ROUTED=$(gc bd show {{issue}} --json | jq -r '.[0].metadata["gc.routed_to"] // empty')
     if [ -n "$ROUTED" ]; then
-        bd update {{issue}} --set-metadata worker_pool="$ROUTED"
+        gc bd update {{issue}} --set-metadata worker_pool="$ROUTED"
     fi
 fi
 ```
@@ -104,28 +104,83 @@ git fetch --prune origin
 
 **2. Ensure worktree exists.**
 
-Check if `metadata.work_dir` already records your worktree path:
-```bash
-WORKTREE=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.work_dir // empty')
-```
+⛔ **Provision with `gc worktree ensure`, never a bare `git worktree add`.**
+The controller refuses to launch a pool session for a bead whose work_dir lacks
+complete worktree provenance -- silently, by dropping the session from desired
+state every tick. It emits one stderr line and nothing else: no entry in
+`gc status`, `gc session list`, or events, so the bead looks exactly like an
+idle pool. Measured 2026-08-31: a bead carrying a bare work_dir got ZERO
+reviewer sessions in 10 minutes; the same bead with that value cleared got TWO
+within 30 seconds. Publishing the evidence below is what keeps your bead
+dispatchable after you hand it on.
 
-**If worktree path exists in metadata** — reuse it:
-```bash
-cd "$WORKTREE"              # Enter existing worktree
-```
-If the directory is missing (witness cleaned it, disk issue), fall through
-to create a new one.
+⛔ **Run this whether or not a worktree already exists.** `gc worktree ensure`
+is idempotent, so there is deliberately NO separate create-vs-reuse path here.
+An earlier version of this step only published provenance when it CREATED a
+worktree; a bead that already had a work_dir took a bare `cd "$WORKTREE"` and
+published nothing, so the missing keys were never backfilled and the bad shape
+survived every rework round. ex-bd9lhd.3.5 re-acquired it on round 3 that way.
+Reuse must republish.
 
-**If no worktree** — create one scoped to the bead, not the agent:
+Resolve the branch BEFORE provisioning: `gc worktree ensure` binds the branch
+into the durable identity, so it cannot be a detached checkout you name later.
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
-git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
+BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+[ -n "$BRANCH" ] || BRANCH="polecat/{{issue}}"
+
+REPO=$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')
+WORKTREE_ROOT=$(pwd)/worktrees
+# Honour a path already recorded on the bead (witness recovery, or a prior
+# round) so reuse ensures the SAME directory rather than silently relocating.
+RECORDED=$(gc bd show {{issue}} --json | jq -r '.[0].metadata."gc.work_dir" // .[0].metadata.work_dir // empty')
+if [ -n "$RECORDED" ]; then
+    WORKTREE_PATH=$RECORDED
+    WORKTREE_ROOT=$(dirname "$RECORDED")
+else
+    WORKTREE_PATH=$WORKTREE_ROOT/{{issue}}
+fi
+BASE_REF=origin/{{base_branch}}
+BASE_SHA=$(git rev-parse "$BASE_REF")
+RIG=$(pwd | awk -F'/.gc/worktrees/' '{print $2}' | cut -d/ -f1)
+OWNER=$(gc runtime session-name 2>/dev/null || echo "${USER:-polecat}")
+GENERATION=$(date -u +%Y%m%dT%H%M%SZ)
+```
+```bash
+REPORT=$(gc worktree ensure --json --repo "$REPO" --root "$WORKTREE_ROOT" --path "$WORKTREE_PATH" --branch "$BRANCH" --base "$BASE_REF" --base-sha "$BASE_SHA" --bead {{issue}} --store-ref "rig:$RIG" --creator mol-polecat-work --owner "$OWNER" --generation "$GENERATION" --lifecycle active)
+if [ $? -ne 0 ]; then
+    echo "gc worktree ensure failed. STOP -- do NOT fall back to git worktree add."
+    echo "A bare git worktree add publishes no provenance and strands this bead."
+    gc runtime drain-ack
+    exit 1
+fi
 cd "$WORKTREE_PATH"
 ```
-Record immediately so restarts and witness recovery can find it:
+
+Publish the evidence immediately. The command RETURNS provenance but does
+**not** write it to the bead -- that is the caller's job, and skipping it is
+the whole defect this replaced:
 ```bash
-gc bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+pv() { printf '%s' "$REPORT" | jq -r ".provenance.$1"; }
+
+gc bd update {{issue}} --set-metadata gc.work_dir="$(pv path)" --set-metadata gc.worktree_repo="$(pv repo_identity)" --set-metadata gc.worktree_root="$WORKTREE_ROOT" --set-metadata gc.work_branch="$(pv branch)" --set-metadata gc.worktree_base_ref="$(pv base_ref)" --set-metadata gc.worktree_base_sha="$(pv base_sha)" --set-metadata gc.worktree_creator="$(pv creator)" --set-metadata gc.worktree_owner="$(pv owner)" --set-metadata gc.worktree_generation="$(pv generation)" --set-metadata gc.worktree_lifecycle="$(pv lifecycle)"
 ```
+
+⚠ `gc.worktree_root` is stamped from the value you PASSED as `--root`. It is
+deliberately not echoed back in the provenance JSON, so it cannot be read out
+of `$REPORT`.
+
+⛔ Then clear any legacy `work_dir`. Canonical `gc.work_dir` and legacy
+`work_dir` both set but DIFFERENT is its own hard refusal -- a separate trip
+condition from missing keys, and one a reused worktree hits easily:
+```bash
+gc bd update {{issue}} --unset-metadata work_dir
+```
+
+Verify before moving on. Nine non-empty keys, or the bead is undispatchable:
+```bash
+gc bd show {{issue}} --json | jq -r '.[0].metadata as $m | ["gc.worktree_repo","gc.worktree_root","gc.work_branch","gc.worktree_base_ref","gc.worktree_base_sha","gc.worktree_creator","gc.worktree_owner","gc.worktree_generation","gc.worktree_lifecycle"] | map(select(($m[.] // "") == "")) as $missing | if ($missing | length) == 0 then "provenance OK" else "MISSING: " + ($missing | join(", ")) end'
+```
+Do not proceed on anything but `provenance OK`.
 
 Worktrees are scoped to the work bead (not the agent name) so that:
 - An agent can pick up new work even if an old worktree is being recovered
@@ -222,9 +277,50 @@ git status                  # Should be clean
 ```
 Empty setup_command → skip.
 
+**6. Bring up any service the test suite needs.**
+
+**A skipped test is not a passing test.** A suite that silently skips
+because a dependency is absent reports success while proving nothing, and
+`ok  <pkg>` in the output looks identical either way. If the tests you are
+about to rely on skip for a missing service, and that service can be run
+here, run it — then re-check that the tests actually EXECUTED, not merely
+that the package exited 0.
+
+**Postgres is available in this environment.** `psql`, `pg_isready` and
+`docker` are all absent, which makes it look like it is not — the missing
+CLIENT is not evidence of a missing SERVER. Binaries (server-side only):
+
+```bash
+export LC_ALL=C LANG=C        # initdb fails "invalid locale settings" without this
+PGBIN=/home/agent/.embedded-pg/bin-pg16/bin   # initdb, pg_ctl, postgres
+PGDATA=$(pwd)/.pgdata; PGPORT=$((54300 + RANDOM % 200))
+"$PGBIN/initdb" -D "$PGDATA" -U postgres --auth=trust --locale=C --encoding=UTF8
+"$PGBIN/pg_ctl" -D "$PGDATA" \
+    -o "-p $PGPORT -k /tmp -c listen_addresses=127.0.0.1" -l "$PGDATA/pg.log" -w start
+export DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/postgres?sslmode=disable"
+```
+
+Pick a random port — several polecats may run concurrently. Put `$PGDATA`
+inside your worktree so witness cleanup reclaims it, and stop the server in
+the submit step (`pg_ctl -D "$PGDATA" stop`) so you do not leak a process.
+There is no `psql`; query through a throwaway Go/Python program using the
+repo's own driver, or just run the suite.
+
+**If your change is a database MIGRATION, verify on TWO databases.** They
+answer different questions and one alone will mislead you:
+
+1. The repo's migration round-trip tests. These walk the migrator DOWN past
+   your migration, which is the only way a broken `Down` surfaces — and a
+   broken `Down` fails every unrelated round-trip test in the package, so
+   the damage is never confined to your own feature.
+2. A FRESH cluster, migrate-up only, then read the rows back. This is what a
+   newly provisioned environment actually gets. A database that has run the
+   test suite is polluted by fixtures, and rows it shows you may have been
+   written by a test rather than by your migration.
+
 **Exit criteria:** In your worktree, on a clean feature branch, rebased
-on latest {{base_branch}}, deps installed, worktree and branch recorded
-on the bead."""
+on latest {{base_branch}}, deps installed, any service the suite needs
+running, worktree and branch recorded on the bead."""
 
 [[steps]]
 id = "submit-and-exit"
@@ -244,6 +340,35 @@ git add -A && git commit -m "chore: capture remaining work ({{issue}})"
 ```
 This is a belt-and-suspenders check — self-review should have caught this,
 but we never push with untracked work left behind.
+
+If you started a service in workspace-setup step 6, stop it now and make
+sure its data directory is not what you are about to commit:
+```bash
+[ -d "$PGDATA" ] && "$PGBIN/pg_ctl" -D "$PGDATA" stop -m fast && rm -rf "$PGDATA"
+```
+A left-running server leaks a process past your own lifetime; a committed
+data directory is hundreds of megabytes of binary noise in the diff.
+
+⛔ **Keep PGDATA inside your own worktree, and never clean up with a wildcard
+against a shared directory.** `$(pwd)/.pgdata` above is deliberate: it is yours
+alone, and `rm -rf "$PGDATA"` names exactly one path you own.
+
+2026-09-01: a polecat improvised its scratch clusters under `/tmp` instead and
+tore them down with `rm -rf /tmp/tmp.*/pg`. The glob also matched a SIBLING
+polecat's live cluster and deleted it out from under a running postgres
+(pid 9304, port 55471) while that agent was mid-test. Only a throwaway test
+database was lost -- the sibling's committed work was already pushed -- but
+nothing about the command made that outcome lucky rather than catastrophic.
+
+`/tmp` is shared by every agent in the city. A path shape you believe is
+exclusively yours is not: `tmp.*` is exactly the shape `mktemp -d` hands to
+everybody. If you ever do need a temp directory outside your worktree, keep the
+handle `mktemp -d` returned and remove THAT variable -- never a pattern.
+
+The polecat that did this self-reported it immediately and did not try to
+"repair" the sibling by restarting or killing anything, which was the right
+call: an unprompted fix on another agent's process compounds the damage. Report
+and let the owner recover.
 
 **2. Push your branch:**
 ```bash
@@ -284,7 +409,7 @@ the workspace is the rig. Writing a rendered empty rig prefix produces
 
 Hand off as **unassigned + routed**, not assignee=pool. Two layers
 both filter `assignee != ""` out of pool demand:
-1. The reviewer hook's tier-3 query (`bd ready --metadata-field
+1. The reviewer hook's tier-3 query (`gc bd ready --metadata-field
    gc.routed_to=<pool> --unassigned`) requires a null assignee.
 2. The supervisor's `defaultPoolDemand` pass also skips beads whose
    `Assignee` is set, since pool-template names aren't session
@@ -293,7 +418,7 @@ both filter `assignee != ""` out of pool demand:
 
 Setting `assignee=<pool template>` makes the bead invisible to both
 and strands it until a human runs `gc sling --nudge --force`. The
-reviewer atomically claims via `bd update --claim`, which then fills
+reviewer atomically claims via `gc bd update --claim`, which then fills
 in the session-identifier assignee and bumps status to in_progress.
 This matches the reject path (reviewer→polecat) which already gets
 this right.

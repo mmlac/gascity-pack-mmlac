@@ -3,10 +3,26 @@ provider = "codex"
 wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/reviewers/{{.AgentBase}}"
 namepool = "/gc/packs/mmlac/shared/reviewer/namepool.txt"
-nudge = "Run gc hook; it checks assigned work first, then routed pool work."
+nudge = "Run gc hook --claim --json to TAKE your next work item and begin it immediately. It checks assigned work first, then routed pool work. Plain 'gc hook' only READS and does not claim -- reading it and stopping leaves the work unowned and the wave stalled."
 pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 idle_timeout = "15m"
 min_active_sessions = 0
+
+# 2026-09-02 21:50Z (mayor, OWNER-DIRECTED): ceiling was dropped 5 -> 0 for ~9
+# minutes, then RESTORED to 5 at 21:59Z once the owner confirmed codex was signed
+# back in. Kept as a worked example, because the failure mode is not obvious:
+#
+# Both live members (kael, trilling) were sitting at a "Sign in with ChatGPT"
+# prompt while still reading `active` in `gc session list` with recent activity.
+# A pool FULL of logged-out members is worse than an empty one -- the reconciler
+# sees it at strength and pours nothing, so every bead routed to it strands while
+# every dashboard reads green. The repeatedly-respawning sessions were themselves
+# feeding the OpenAI rate limit that blocked the interactive login, so dropping
+# the ceiling to 0 (and closing both sessions) was what let the owner sign in.
+#
+# Detector: peek, don't trust status -- `gc bd list --assignee <pool> --status open`
+# returning nothing while beads carry gc.routed_to=<pool> is the prompt to peek.
+# Route around it with the claude-backed ../reviewer-fallback/ pool meanwhile.
 max_active_sessions = 5
 
 [option_defaults]

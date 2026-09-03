@@ -1,0 +1,54 @@
+# River-themed pool names for polecat-devstral-local (local OpenCode/ollama).
+#
+# Disjoint from polecat-sonnet (philosophers), polecat-opus (Mad Max),
+# polecat-haiku (rock bands) and polecat-qwen-local (constellations) so tiers
+# never share a persona name — different tiers picking the same persona would
+# collapse to the same worktree path and cause sibling-branch contamination.
+nile
+amazon
+congo
+danube
+volga
+ganges
+mekong
+yangtze
+thames
+seine
+rhine
+rhone
+ebro
+tiber
+douro
+tagus
+oder
+elbe
+vistula
+dnieper
+don
+ural
+brahmaputra
+irrawaddy
+salween
+mackenzie
+yukon
+columbia
+colorado
+missouri
+ohio
+hudson
+potomac
+shannon
+severn
+clyde
+niger
+zambezi
+limpopo
+orinoco
+parana
+magdalena
+fraser
+kaveri
+godavari
+narmada
+loire
+garonne

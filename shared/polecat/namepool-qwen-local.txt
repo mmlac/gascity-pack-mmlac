@@ -1,0 +1,56 @@
+# Constellation-themed pool names for polecat-qwen-large (local OpenCode/ollama).
+#
+# Disjoint from polecat-sonnet (philosophers), polecat-opus (Mad Max) and
+# polecat-haiku (rock bands) so tiers never share a persona name — different
+# tiers picking the same persona would collapse to the same worktree path and
+# cause sibling-branch contamination.
+orion
+cassiopeia
+andromeda
+perseus
+draco
+cygnus
+aquila
+lyra
+hydra
+pegasus
+phoenix
+cetus
+corvus
+crux
+carina
+vela
+puppis
+ara
+lupus
+scorpius
+sagittarius
+capricornus
+aquarius
+ophiuchus
+hercules
+bootes
+auriga
+columba
+lynx
+lacerta
+fornax
+tucana
+pavo
+grus
+dorado
+volans
+norma
+pyxis
+antlia
+sculptor
+sextans
+monoceros
+serpens
+scutum
+cepheus
+hydrus
+indus
+mensa
+octans
+reticulum

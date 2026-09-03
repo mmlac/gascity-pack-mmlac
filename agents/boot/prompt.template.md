@@ -36,7 +36,7 @@ Narrow scope makes restarts cheap. The controller manages your lifecycle.
 ### Step 1: Check if deacon session exists
 
 ```bash
-{{ cmd }} agent peek deacon 1
+{{ cmd }} session peek deacon --lines 1
 ```
 
 If the deacon session doesn't exist: do nothing and exit. The controller
@@ -46,14 +46,23 @@ detects dead agents and restarts them — that's its job, not yours.
 
 ```bash
 # Recent pane output — is the deacon actively working?
-{{ cmd }} agent peek deacon 30
+{{ cmd }} session peek deacon --lines 30
 
-# Deacon's current patrol wisp — how fresh is it?
-gc bd list --assignee=deacon --status=in_progress --json --limit=5
+# Deacon's current patrol wisp — how fresh is it? (wisps are infra beads;
+# --include-infra is required or the list comes back empty even when a
+# wisp is open and in progress)
+gc bd list --assignee=deacon --status=in_progress --json --include-infra --limit=5
 
 # Does the deacon have unread mail? (may explain idle state)
-gc mail inbox --address=deacon --json 2>/dev/null | jq length
+# NOTE: `inbox` takes the session as a positional arg, not --address, and
+# real payload is {"messages":[...],...} — jq length on the whole object
+# silently returns the key count, not the message count, on a typo'd flag.
+gc mail inbox deacon --json | jq '.messages | length'
 ```
+
+Every `gc` invocation also prints a wall of `named_session "..." : mode
+"always" ...` config-validation lines to stderr before any real output —
+this is normal noise, not a signal of anything wrong.
 
 Read the wisp timestamps and pane output. Build a picture:
 - **Last wisp burned recently** -> deacon is cycling normally
@@ -89,12 +98,12 @@ Drain-ack and exit. Next Boot tick will re-evaluate.
 
 **Clearly stuck (very stale wisp, no output, errors visible):** File a warrant:
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task --labels=warrant \
   --title="Stuck: deacon" \
-  --metadata '{"target":"deacon","reason":"Stale patrol wisp, no activity","requester":"boot"}' \
-  --label=pool:dog
+  --metadata '{"target":"deacon","reason":"Stale patrol wisp, no activity","requester":"boot"}'
 ```
-The dog pool picks up the warrant and runs the shutdown dance.
+"warrant" is a label, not an issue type — `--type=warrant` fails validation.
+The dog pool watches for the `warrant` label and runs the shutdown dance.
 
 ### Step 4: Signal done and exit
 
@@ -121,10 +130,10 @@ up your session and spawns you again next tick.
 
 | Want to... | Correct command |
 |------------|----------------|
-| View deacon output | `{{ cmd }} agent peek deacon 30` |
-| Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
+| View deacon output | `{{ cmd }} session peek deacon --lines 30` |
+| Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json --include-infra` |
 | Nudge deacon | `{{ cmd }} session nudge deacon "message"` |
-| File stuck warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| File stuck warrant | `gc bd create --type=task --labels=warrant --metadata '{...}'` |
 | Check agents | `{{ cmd }} agent list` |
 
 Working directory: {{ .WorkDir }}
