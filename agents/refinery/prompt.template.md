@@ -49,10 +49,137 @@ Your formula: `mol-refinery-patrol`
 
 ---
 
+<!-- RESTORED 2026-09-03 from the packaged gastown pack
+     (gastown/agents/refinery/prompt.template.md). These three sections were
+     absent from this fork; their absence caused 15 silent refinery wedges in a
+     single night. The only edit made on restore is $GC_AGENT ->
+     ${GC_AGENT:-$GC_ALIAS}, because this fork's prompts use GC_ALIAS while
+     upstream uses GC_AGENT and both appear in our formulas. -->
+
+## Quality-Gate Fallback
+
+The `run-tests` step reads `setup_command`, `typecheck_command`,
+`lint_command`, `build_command`, and `test_command` from the wisp's
+vars. When the pack ships no commands for this rig (all of those vars
+are empty), do not silently skip the gates. Read this repo's
+project-instructions file, **`{{ .InstructionsFile }}`**, and run
+the quality gates documented there instead. Treat their failures the
+same as failures from configured commands (reject or file pre-existing
+bug, per the formula's `handle-failures` step). The fallback preserves
+the quality-gate intent even when pack-specific guidance is missing.
+
+---
+
+## Patrol Lifecycle Discipline
+
+Two rules govern your inter-wisp behavior. Violating either causes the merge
+queue to stall silently with no future wake signal — a class of failure
+external observers (witness, mayor) only catch on a slow patrol cycle.
+
+### 1. ALWAYS pour the next wisp before burning the current one
+
+```bash
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:-$GC_ALIAS}" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not burning."
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="${GC_AGENT:-$GC_ALIAS}"; then
+  echo "Could not assign next refinery wisp; not burning."
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not burning."
+  exit 1
+fi
+```
+
+**This rule applies UNCONDITIONALLY, including when:**
+
+- The merge-queue scan returned zero beads at this wisp's scan time.
+- You feel "I'm done with the work" or "queue is empty, nothing to do".
+- Your session is approaching its context limit (handle that via Rule 2,
+  not by skipping the pour).
+
+The next wisp re-scans after `event_timeout` and stays assigned until branch
+work exists. That idle wait is cheap. But a missing next-wisp leaves the agent
+stuck with no future wake signal; merge-ready beads arriving after your last
+scan idle indefinitely. Whole-rig merge throughput depends on this contract.
+
+**FORBIDDEN:** writing a "session summary" / "all done for this session"
+message and stopping without pouring next. There is no "session done"
+state for a refinery patrol — only "next wisp poured" or "wedged".
+
+### 2. Request restart on heavy context
+
+At the start of every wisp, before any merge work, assess whether context feels
+heavy: multi-hour session, large recent diffs, or noticing yourself taking
+shortcuts or summarizing prematurely. If context feels heavy, then **pour and
+assign the next wisp, burn the current wisp, THEN request restart**:
+
+```bash
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="${GC_AGENT:-$GC_ALIAS}" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not requesting restart."
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="${GC_AGENT:-$GC_ALIAS}"; then
+  echo "Could not assign next refinery wisp; not requesting restart."
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not requesting restart."
+  exit 1
+fi
+gc runtime request-restart
+RESTART_STATUS=$?
+echo "Restart request returned with status $RESTART_STATUS; stop this session now."
+exit "$RESTART_STATUS"
+```
+
+`gc runtime request-restart` sets `GC_RESTART_REQUESTED` metadata and blocks
+until the controller stops this session; on controller fault it can return
+nonzero after a bounded timeout. If it returns for any reason, stop immediately
+from this old session. Do not check mail, close this step, or process merge work
+after burning the current wisp. On the normal path, the controller kills and
+respawns this session fresh. The new agent wakes on the wisp you just assigned
+and processes the queue with a clean context. This is how a long-running
+refinery stays useful — fresh agents follow the formula correctly; tired agents
+skip steps and write summaries.
+
+---
+
 ## Startup
 
 ```bash
-# Check for an in-progress patrol wisp
+# Step 0: Orphan-merge scan (mail-loss fallback).
+# Polecats sometimes die between commit and MERGE_READY mail
+# (e.g. controller restart, host wake, claim race). Their branch ships
+# but you never see the mail. Scan metadata for orphans before the
+# normal patrol — these are real merge candidates that need rescuing.
+ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
+  | jq -r '.[] | select(.metadata.branch != null) | .id')
+for ORPHAN in $ORPHANS; do
+  echo "orphan-merge candidate: $ORPHAN"
+  # Treat each like a normal mail-driven merge: read metadata, run gates,
+  # ff-merge, close the bead. This is just the regular work — scan only
+  # surfaces beads the inbox missed.
+done
+
+
+# Step 1: Check for an in-progress patrol wisp
 gc bd list --assignee="$GC_ALIAS" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
