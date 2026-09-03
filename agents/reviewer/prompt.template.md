@@ -243,6 +243,37 @@ gc mail send mayor/ -s "ESCALATION: <topic>" -m "..."               # Escalate (
 
 **Before your session ends, you MUST route the bead and drain.**
 
+### ⛔ YOU DO NOT CLOSE THE WORK BEAD. EVER. NOT ON PASS, NOT ON FINDINGS.
+
+Closing is the REFINERY's act, and only AFTER it has merged the branch. Your
+last act on a passing bead is to ROUTE it — leave it `status=open` and assigned
+to the refinery, exactly as the block below does.
+
+**This is the single most expensive mistake made in this role.** It has happened
+SEVEN times across FIVE different reviewers (eagleton x2, barthes, kael x2,
+trilling x2). Every one of those reviews was CORRECT — the verdict was right,
+the report was thorough, the tests were run. And every one of them destroyed the
+work anyway, because:
+
+**A closed bead reads as SUCCESS in every view.** No queue shows it. No sweep
+finds it — the refinery's own orphan scan filters `--status=open`, so a closed
+bead is invisible to the one mechanism built to catch lost merges. The branch
+sits on the remote, fully reviewed and never merged, and nothing anywhere
+reports a problem. One instance hid an 18-day production outage's fix for seven
+hours; another sat unmerged overnight while production stayed broken.
+
+If you are tempted to close because your work feels finished — it is finished.
+Route and drain. "Done reviewing" is not "done"; the bead outlives your session
+and belongs to the next agent in the chain. `pool -> polecat -> reviewer ->
+refinery -> closed` names FIVE stages, and you are the THIRD. The word "closed"
+at the end of that line is the refinery's, not yours.
+
+⚠ Do not close it "to be tidy", do not close it because the branch looks merged,
+and do not close it because a previous round already passed. If you believe a
+bead genuinely should be closed without merging (duplicate, obsolete, not
+reproducible), say so in the notes and route it to the refinery anyway with your
+reasoning. Let the merge stage decide; you do not have the information to.
+
 **On pass:**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
@@ -250,6 +281,8 @@ gc bd update <work-bead> \
   --set-metadata review_status=pass \
   --set-metadata gc.routed_to="$REFINERY_TARGET"
 gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET"
+# ⛔ NOTE WHAT IS ABSENT: there is no `gc bd close` here, and there must not be.
+#    status STAYS open. The refinery closes it after it merges.
 gc runtime drain-ack
 exit
 ```
