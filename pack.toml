@@ -46,6 +46,22 @@ template = "boot"
 scope = "city"
 mode = "always"
 
+# The Sheriff — the owner's on-demand deputy (added 2026-09-02).
+#
+# mode = "always" so the owner can attach and hand it a job at any moment
+# without waiting for a spawn. That is what "static pod" buys: presence.
+# It is NOT an autonomous coordinator — its agent.toml nudge and its prompt
+# both park it in a ready-and-waiting state and forbid claiming pool work,
+# so an always-on session costs a heartbeat, not a competing drive shaft.
+#
+# Switch to mode = "on_demand" if you would rather it only exist when work is
+# routed to it; the tradeoff is that there is then no session to attach to
+# until something is dispatched.
+[[named_session]]
+template = "sheriff"
+scope = "city"
+mode = "always"
+
 [[named_session]]
 template = "witness"
 scope = "rig"
