@@ -248,7 +248,4 @@ append_exclude ".github/hooks/"
 append_exclude ".github/copilot-instructions.md"
 append_exclude "state.json"
 
-# Optional sync.
-sync_worktree
-
 exit 0

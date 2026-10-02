@@ -17,3 +17,9 @@ name = "gascitysource"
 prefix = "gct"
 includes = ["./packs/mmlac"]
 ```
+
+## Tests
+
+Run `python3 -m unittest discover -s tests -v` from the pack directory.
+The worktree tests use Git and `sh` in disposable local repositories. They do
+not start agents or access a beads database.
