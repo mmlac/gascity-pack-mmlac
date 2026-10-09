@@ -56,12 +56,20 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 12
+version = 13
 
 [vars]
 [vars.event_timeout]
-description = "Seconds to wait for events before re-checking (exponential backoff)"
+description = "Seconds one event watch blocks before the idle loop re-arms it"
 default = "30"
+
+[vars.idle_floor]
+description = "Minimum seconds between patrol cycles — stops a busy city hot-looping the patrol"
+default = "60"
+
+[vars.idle_budget]
+description = "Maximum seconds to idle before patrolling anyway (see next-iteration step 4)"
+default = "420"
 
 [[steps]]
 id = "check-inbox"
@@ -921,9 +929,41 @@ id = "next-iteration"
 title = "Pour next iteration and loop"
 needs = ["patrol-summary"]
 description = """
-**Config: event_timeout = {{event_timeout}}**
+**Config: event_timeout = {{event_timeout}}, idle_floor = {{idle_floor}},
+idle_budget = {{idle_budget}}**
 
-End of patrol cycle. Pour the next iteration, then wait or exit.
+End of patrol cycle. Pour the next wisp, burn this one, idle in ONE blocking
+call, and begin the next cycle IN THE SAME TURN.
+
+## ⛔ Read this before you touch step 4 (gcs-i31)
+
+**Nothing outside this session will ever wake you.** The witness is a
+`mode = "always"` named session, and the controller exempts those from both
+the idle-timeout and the max-session-age trackers — `buildIdleTracker` in
+the gascity source (`cmd/gc/cmd_start.go`) carries the comment *mode=always must never be subject
+to idle timeout*. The `idle_timeout = "1h"` in `agents/witness/agent.toml` is
+INERT for you. There is no reaper and no restart clock behind you.
+
+So if you end your turn while waiting, the patrol is over until a human or
+another agent nudges you — and it will look healthy the whole time it is
+over: live process, prompt replies, coherent answers. Measured 2026-10-08:
+`witness.refinery_nudged_at` went 6.5 h stale with four passed beads parked
+at the refinery, while the mayor hand-nudged the queue five times.
+
+The old version of this step ran a bare `gc events --watch` and then told you
+in prose to "proceed anyway" on timeout. Two things made that a wedge:
+
+1. the instruction was addressed to a turn that nothing causes, and
+2. **a timed-out watch prints nothing and exits 0** — measured 2026-10-09: a
+   watch on a type that never fires blocks the full timeout, then returns
+   empty with rc=0. (rc=1 is a real error, e.g. a cursor older than the
+   event log.) So a bare watch ends a step with a silent, empty 30-second
+   call and nothing to act on, which is exactly when an agent stops and
+   reports instead of continuing.
+
+Step 4 keeps waiting until there is something to act on, and hands you a line
+that says what to do next. Run it as written; never run a bare watch. And
+test the watch by whether it printed anything — **never by its exit code.**
 
 **1. Context check:**
 
@@ -931,8 +971,10 @@ If context feels heavy or RSS is high:
 ```bash
 gc runtime request-restart
 ```
-This blocks forever. The controller restarts you. The next wisp
-is already assigned — the new session resumes from context.
+The controller restarts you, and because the next wisp is already assigned the
+new session resumes the patrol from bead state. This is also your escape hatch
+for step 4: **if you are going to stop for any reason, request a restart
+first.** A restart is a guaranteed wake; an ended turn is a silent stop.
 
 **2. Pour next iteration BEFORE burning:**
 ```bash
@@ -940,22 +982,63 @@ NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_i
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
-**3. Wait for activity (exponential backoff):**
-```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
-```
-
-On event: proceed immediately.
-On timeout: double the timeout (cap 300s) and proceed anyway.
-
-**4. Burn this wisp:**
+**3. Burn THIS wisp now — before the wait, not after:**
 ```bash
 gc bd mol burn <this-wisp-id> --force
 ```
+Burning first is deliberate. If your turn does end at step 4, the state you
+leave behind is the one a fresh session expects: exactly one wisp, poured and
+assigned, nothing in flight. The old order (wait, then burn) left two live
+wisps, so the next session resumed into "cycling with a stale wisp". A second
+`burn --force` on an already-burned wisp is harmless, so re-running this step
+after a resume costs nothing.
 
-The new wisp is ready. Re-read formula steps to start
-the next patrol cycle.
+**4. Idle — ONE blocking call, and you may not end your turn at it:**
+```bash
+FLOOR={{idle_floor}}
+BUDGET={{idle_budget}}
+START=$(date +%s)
+WAKE=budget
+sleep "$FLOOR"
+while [ $(( $(date +%s) - START )) -lt "$BUDGET" ]; do
+  SEQ=$(gc events --seq 2>/dev/null | tail -1)
+  case "$SEQ" in ''|*[!0-9]*) sleep 30; continue ;; esac
+  HIT=$(gc events --watch --type=bead.updated --after="$SEQ" \
+          --timeout {{event_timeout}}s 2>/dev/null)
+  if [ -n "$HIT" ]; then
+    WAKE=event
+    break
+  fi
+  sleep 5
+done
+echo "WITNESS_IDLE_DONE wake=$WAKE waited=$(( $(date +%s) - START ))s -- START THE NEXT CYCLE NOW"
+```
 
-**Exit criteria:** Next wisp poured, this wisp burned."""
+- `FLOOR` is the floor on patrol spacing. Without it, one bead update anywhere
+  in the city restarts the patrol immediately and a busy city hot-loops you.
+  `BUDGET` is the ceiling, so a quiet city still gets patrolled. **The backoff
+  now lives in the shell** — prose cannot carry state across a tool call,
+  which is why the old "double the timeout (cap 300s)" never once happened.
+- The watch is a wake-up signal, never a data source. Do not read the event
+  payload: the next cycle re-reads every count from beads anyway. (The
+  refinery learned this one the hard way — see its `find-work` step.)
+- This blocks for up to `BUDGET` plus one `event_timeout` — about 450s on the
+  defaults. **Pass an explicit tool timeout larger than that** (≈540000 ms).
+  The harness default is 2 minutes and its hard ceiling is 10 minutes, so a
+  bigger budget has to be split across calls, never run as one.
+- `$HIT` is empty on timeout and holds the event JSON otherwise — that is the
+  only reliable test, since both outcomes exit 0. Capturing it instead of
+  letting it print also keeps a 4 KB event blob per cycle out of your context.
+  The `sleep 5` keeps a watch that fails instantly — API down, bad cursor —
+  from spinning the whole budget away in a hot loop.
+
+**5. Begin the next cycle in this same turn.**
+
+The `WITNESS_IDLE_DONE` line is an instruction, not a status report: re-read
+the formula from `check-inbox` and run the next patrol now. Its wisp is
+already poured and assigned to you.
+
+**Exit criteria:** Next wisp poured and assigned, this wisp burned, exactly
+one `WITNESS_IDLE_DONE` line emitted, and the next cycle begun in the same
+turn. If you are about to end your turn instead, run
+`gc runtime request-restart` first — it is the only wake you have."""

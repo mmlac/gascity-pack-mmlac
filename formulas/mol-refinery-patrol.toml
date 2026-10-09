@@ -44,7 +44,7 @@ merge directly anyway, then close that PR.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 9
+version = 10
 contract = "graph.v2"
 
 [vars]
@@ -85,8 +85,12 @@ description = "Auto-create work beads to land completed integration branches"
 default = "false"
 
 [vars.event_timeout]
-description = "Seconds to wait for events before re-checking (exponential backoff)"
+description = "Seconds one event watch blocks before the find-work loop re-arms it"
 default = "30"
+
+[vars.idle_budget]
+description = "Maximum seconds find-work waits for work before cycling the wisp"
+default = "420"
 
 [[steps]]
 id = "check-inbox"
@@ -256,29 +260,59 @@ gc bd show $WORK --json | jq '.[0].metadata'
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
 
-If NO work found: enter a **poll-then-watch loop**. The watch is a
+If NO work found: enter a **bounded poll-then-watch loop**. The watch is a
 wake-up signal — never a data source. The `gc bd list` re-poll is the
 only authoritative answer to "is there work?".
 
 ```bash
 TIMEOUT={{event_timeout}}
-while [ -z "$WORK" ]; do
-  SEQ=$(gc events --seq)
-  # Filter to events that touch refinery work; drops infra noise
-  # (gate-sweep, orphan-sweep, etc.) so the wake rate matches our cadence.
-  gc events --watch --type=bead.updated --after=$SEQ \
-    --payload-match "bead.assignee=$GC_AGENT" \
-    --timeout ${TIMEOUT}s >/dev/null 2>&1 || true
-  # Event arrived OR timeout — always re-poll, never trust event content.
+BUDGET={{idle_budget}}
+START=$(date +%s)
+while :; do
+  # Re-poll FIRST, every time: the bd list cannot be missed by a cursor race.
   WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
     --exclude-type=epic --exclude-type=molecule --limit=1 --json | jq -r '.[0].id // empty')
+  [ -n "$WORK" ] && break
+  # Budget exhausted — leave the loop rather than sit in a call the harness
+  # will kill. The cycle, not this call, is what waits.
+  [ $(( $(date +%s) - START )) -ge "$BUDGET" ] && break
+  SEQ=$(gc events --seq 2>/dev/null | tail -1)
+  case "$SEQ" in ''|*[!0-9]*) sleep 30; continue ;; esac
+  # Filter to events that touch refinery work; drops infra noise
+  # (gate-sweep, orphan-sweep, etc.) so the wake rate matches our cadence.
+  gc events --watch --type=bead.updated --after="$SEQ" \
+    --payload-match "bead.assignee=$GC_AGENT" \
+    --timeout ${TIMEOUT}s >/dev/null 2>&1 || true
   # Exponential backoff on timeout: helps quiet rigs avoid hot-looping.
-  if [ -z "$WORK" ]; then
-    TIMEOUT=$(( TIMEOUT * 2 ))
-    [ $TIMEOUT -gt 300 ] && TIMEOUT=300
-  fi
+  TIMEOUT=$(( TIMEOUT * 2 ))
+  [ $TIMEOUT -gt 300 ] && TIMEOUT=300
 done
+if [ -n "$WORK" ]; then
+  echo "REFINERY_WORK work=$WORK -- CONTINUE TO rebase NOW"
+else
+  echo "REFINERY_NO_WORK waited=$(( $(date +%s) - START ))s -- GO TO patrol-summary, THEN next-iteration, NOW"
+fi
 ```
+
+**Why the loop is bounded (gcs-i31 audit).** The unbounded version blocked
+until something arrived, which on a quiet rig means the harness kills the call
+at its 10-minute ceiling — and a killed tool call at the end of a step is
+where an agent stops and reports instead of continuing. The budget makes the
+*cycle* the thing that waits, not one tool call.
+
+- This blocks for up to `BUDGET` plus one `TIMEOUT` — about 450s on the
+  defaults. **Pass an explicit tool timeout larger than that** (≈540000 ms);
+  the harness default is 2 minutes and its ceiling is 10 minutes.
+- On `REFINERY_NO_WORK`, do not stop and do not re-run this loop: go to
+  `patrol-summary` (note "no work found", as that step says) and then
+  `next-iteration`, which pours the next wisp and burns this one. The next
+  cycle re-enters here. **You may not end your turn inside this step** — if
+  you are going to stop for any reason, run `gc runtime request-restart`
+  first, so the controller restarts you with the wisp still assigned.
+- Unlike the witness and deacon, the refinery is `mode = "on_demand"`, so its
+  `idle_timeout = "2h"` is live and the controller will eventually recycle a
+  stopped session. That is a two-hour backstop, not a loop: it is why this
+  shows up as merge latency rather than as a dead agent.
 
 Why the re-poll matters: a previous bug pattern (observed 2026-05-10) had
 the refinery interpreting event *content* and dismissing the wake-up when

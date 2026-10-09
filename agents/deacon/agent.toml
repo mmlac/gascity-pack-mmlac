@@ -3,6 +3,13 @@ provider = "claude"
 wake_mode = "fresh"
 work_dir = ".gc/agents/deacon"
 nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
+# ⛔ INERT for the canonical session, do not trust it as a backstop (gcs-i31).
+# This template has a [[named_session]] with mode = "always" in pack.toml, and
+# buildIdleTracker (cmd/gc/cmd_start.go) exempts mode="always" named sessions
+# from BOTH the idle-timeout and max-session-age trackers. Nothing recycles a
+# wedged deacon. It only applies to non-named instance expansions of this
+# template. The loop's self-resumption lives in mol-deacon-patrol's
+# next-iteration step; keep it there.
 idle_timeout = "1h"
 max_active_sessions = 1
 

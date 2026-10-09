@@ -1,0 +1,57 @@
+# patrol-wake — wake a patrol agent whose loop has stopped advancing (gcs-i31).
+#
+# The witness and the deacon are mode="always" named sessions, and
+# buildIdleTracker (gascity cmd/gc/cmd_start.go) exempts those from BOTH the
+# idle-timeout and the max-session-age trackers. Their agent.toml
+# idle_timeout is therefore INERT: nothing recycles them, and a patrol loop
+# that ends its turn while waiting is over with no symptom but an absence
+# (measured 2026-10-08: the witness went 6.5 h without a cycle).
+#
+# mol-{witness,deacon}-patrol's next-iteration step was rewritten to
+# self-propel, but that fix is prose and prose cannot force a next turn. This
+# is the belt, and it is an ORDER rather than an in-session timer for the
+# reason /gc/orders/mergeguard.toml's header gives: a session-hosted timer
+# "died with the session". An order runs inline in the controller, so it
+# survives every drain, restart and `gc reload`, and costs no tokens.
+#
+# It lives in the pack (not /gc/orders/) so it is version-controlled and
+# travels with the formulas it backs up. That is safe here because this pack
+# is a local path import — city.toml [rigs.imports.mmlac] source =
+# "./packs/mmlac", absent from packs.lock — so `gc reload` does not
+# re-materialize it the way it does .gc/system/packs.
+#
+# scope="city": the order watches the city deacon and every rig's witness in
+# one pass, so it must register once, not once per importing rig.
+#
+# Tuning lives in [order.env] — never edit the script for a threshold.
+# Behaviour: nudge when the newest patrol wisp has not advanced within
+# STALE_AFTER, at most once per RENUDGE_AFTER, and after ESCALATE_AFTER
+# nudges in one episode mail the mayor and stop. It never kills or restarts
+# a session, and a bead-store read that errors is reported as an error, not
+# as a healthy agent.
+[order]
+description = "Nudge a witness/deacon whose patrol wisp has stopped advancing (gcs-i31)"
+exec = "$PACK_DIR/assets/scripts/patrol-wake.sh"
+scope = "city"
+trigger = "cooldown"
+interval = "10m"
+timeout = "120s"
+# Re-running is a no-op when nothing is stale, and the per-episode rate limit
+# bounds it when something is: safe to fail open on gate timeout.
+idempotent = true
+
+[order.env]
+# A healthy cycle is one patrol plus at most idle_floor+idle_budget of idling
+# (~8 min on the formula defaults), so this carries roughly 2x headroom.
+# Detection latency is STALE_AFTER + up to one interval.
+GC_PATROL_WAKE_STALE_AFTER = "20m"
+# Minimum gap between two nudges for the same stall, so an agent busy with a
+# long legitimate operation is not nudged every interval.
+GC_PATROL_WAKE_RENUDGE_AFTER = "30m"
+# After this many nudges in one episode, escalate to the mayor and go quiet:
+# if three immediate nudges did not move it, more will not either.
+GC_PATROL_WAKE_ESCALATE_AFTER = "3"
+# Matched against each session's template suffix. The refinery is absent on
+# purpose: it is mode="on_demand", so its idle_timeout=2h is live and the
+# controller recycles it. Add "refinery" here if that ever changes.
+GC_PATROL_WAKE_TEMPLATES = "witness deacon"
