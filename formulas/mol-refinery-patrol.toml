@@ -25,14 +25,26 @@ creates a pull request and never hands one off in place of merging.
 `metadata.merge_strategy` is not read, and `mr` / `pr` mode is removed.
 
 A bead may only close when its code is on the target branch, proved by
-content (`git log origin/$TARGET --grep=$WORK`) rather than by ancestry,
-because this repository squash-merges. If a bead carries `existing_pr`, a
-polecat opened a PR it should not have: merge directly anyway, then close
-that PR.
+ANCESTRY (`git merge-base --is-ancestor`), not by content grep. Your merge is
+`git merge --ff-only`, so the target fast-forwards to your commit and the SHA
+is unchanged: ancestry answers the real question exactly. See the verify
+step's own ⚠⚠ note for why `--grep=$WORK` is forbidden here (it matched a
+documentation commit on 2026-08-27 and passed a bead whose code had not
+landed).
+
+⚠ The "ancestry is always false, use grep" folklore is about SQUASH merges,
+which rewrite SHAs. That is how GitHub lands an interactive PR (the `(#NNN)`
+commits on main), and it is NOT how you land a bead. Verified 2026-09-08:
+`--is-ancestor 8393387f5` (a refinery ff-only merge) is TRUE, while the branch
+tip squash-merged as `d8227a4e8 (#311)` is FALSE. Do not import the workaround
+for a merge strategy you do not use.
+
+If a bead carries `existing_pr`, a polecat opened a PR it should not have:
+merge directly anyway, then close that PR.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 6
+version = 9
 contract = "graph.v2"
 
 [vars]
@@ -106,9 +118,128 @@ upcoming merge work (e.g., priority overrides, hold requests).
 Close this step and proceed."""
 
 [[steps]]
+id = "recovery-scan"
+title = "Report-only sweep for closed-but-unmerged work (does NOT reopen)"
+needs = ["check-inbox"]
+description = """
+**REPORT ONLY. This step never reopens, reassigns or closes a bead.** It mails
+the mayor what it *would* reopen. Owner decision 2026-09-03: prove the predicate
+against real data before it is allowed to act on production beads.
+
+**Why this exists.** Your `find-work` poll filters `--status=open`, so a bead
+that reached `review_status=pass` and then got closed WITHOUT its branch landing
+is invisible to you forever. That is the shape of all nine recorded work-loss
+incidents.
+
+**Throttle — this is a sweep, not a per-iteration check:**
+```bash
+MARK=/tmp/gc-refinery-recovery-scan.stamp
+if [ -f "$MARK" ] && [ $(( $(date +%s) - $(stat -c %Y "$MARK") )) -lt 3600 ]; then
+  echo "recovery scan: throttled (ran <1h ago)"   # close this step, go to find-work
+else
+  # ...run the scan below, then:  touch "$MARK"
+fi
+```
+
+**The query.** ⛔ A bare `gc bd list --status closed` does NOT work: it truncates
+at the limit with a non-recency ordering, so recent closures fall off the end.
+Measured 2026-09-03 — six known closed beads, only 1-3 returned depending on
+filters. `--closed-after` plus `--limit 0` returns them all (56 rows, 6/6 found):
+```bash
+SINCE=$(date -u -d '3 days ago' +%Y-%m-%d)
+gc bd list --assignee=$GC_AGENT --status closed --closed-after "$SINCE" \
+  --metadata-field review_status=pass --limit 0 --json > /tmp/recovery-scan.json
+```
+
+**The predicate — four tiers, cheapest and strongest first.**
+⛔⛔ `git cherry` ALONE IS NOT SUFFICIENT. Validated against 247 real beads on
+2026-09-03: it produced **6 false positives**, every one a branch the refinery
+had rebased through a conflict, which rewrites the patch-id it keys on. Reopening
+those would have re-poured polecats onto finished work. Apply the tiers in order
+and stop at the first that answers MERGED:
+
+1. **`metadata.merged_sha` is an ancestor of `origin/$TARGET`** — strongest and
+   cheapest. Resolved 2 of the last 3 suspects instantly. Both were merged by a
+   commit that does not mention the bead id, so no grep would have found them.
+2. **`git cherry origin/$TARGET origin/$BRANCH` has no `+` lines** — merged.
+3. **Every `+` commit's SUBJECT appears on `origin/$TARGET`** — merged via
+   rebase; the patch-id changed but the change landed.
+4. **Branch absent from the remote** — AMBIGUOUS, never MERGED and never LOST.
+   Pruned-after-merge and never-pushed look identical. Resolve to UNKNOWN unless
+   tier 1 answers it.
+
+Anything surviving all four is a SUSPECT.
+
+```bash
+python3 - <<'PYEOF'
+import json, subprocess
+P = "/gc/projects/execcoreai"
+def sh(a): return subprocess.run(a, capture_output=True, text=True, cwd=P).stdout
+sh(["git", "fetch", "--prune", "origin"])
+rows = json.load(open("/tmp/recovery-scan.json"))
+suspect = []
+for r in rows:
+    m = r.get("metadata") or {}
+    if isinstance(m, str):
+        try: m = json.loads(m)
+        except Exception: m = {}
+    bid = r.get("id"); br = m.get("branch"); tgt = m.get("target") or "main"
+    if not br:
+        continue
+    # tier 1: the refinery's own recorded merge sha
+    msha = m.get("merged_sha")
+    if msha and subprocess.run(["git","merge-base","--is-ancestor",msha,"origin/"+tgt],
+                               cwd=P).returncode == 0:
+        continue
+    ref = "origin/" + br
+    if not sh(["git","rev-parse","--verify","--quiet",ref]).strip():
+        # tier 4: absent branch is AMBIGUOUS
+        if not sh(["git","log","origin/"+tgt,"--grep",bid,"--oneline","-1"]).strip():
+            suspect.append((bid, br, tgt, "UNKNOWN: no branch, no merged_sha, target never cites bead"))
+        continue
+    plus = [l[2:] for l in sh(["git","cherry","origin/"+tgt,ref]).splitlines() if l.startswith("+")]
+    if not plus:
+        continue                                  # tier 2
+    missing = []
+    for sha in plus:                              # tier 3
+        subj = sh(["git","log","-1","--format=%s",sha]).strip()
+        if subj and not sh(["git","log","origin/"+tgt,"--fixed-strings","--grep",subj,
+                            "--oneline","-1"]).strip():
+            missing.append(subj[:90])
+    if missing:
+        suspect.append((bid, br, tgt, "%d/%d commits absent by patch-id AND subject: %s"
+                        % (len(missing), len(plus), missing[:3])))
+print("recovery scan: examined %d, suspect %d" % (len(rows), len(suspect)))
+for s in suspect:
+    print("  SUSPECT %s | %s -> %s | %s" % s)
+open("/tmp/recovery-scan-suspects.txt","w").write(
+    "\n".join("%s | %s -> %s | %s" % s for s in suspect))
+PYEOF
+```
+
+**Report. Do not act.**
+```bash
+if [ -s /tmp/recovery-scan-suspects.txt ]; then
+  gc mail send mayor/ -s "Recovery scan: $(wc -l < /tmp/recovery-scan-suspects.txt) closed-but-unmerged suspect(s)" \
+    -m "$(cat /tmp/recovery-scan-suspects.txt)
+
+REPORT ONLY -- nothing was reopened. Each line survived all four merge tiers
+(recorded merged_sha, git cherry patch-id, subject match, absent-branch).
+Verify by hand before reopening: an unmerged branch may be SUPERSEDED rather
+than stranded, and a bead whose work was redone elsewhere must NOT be reopened."
+fi
+touch /tmp/gc-refinery-recovery-scan.stamp
+```
+
+⚠ A clean scan is a real result — say so in the patrol summary. A scan that
+errors is NOT a clean scan; report the error instead of the absence of suspects.
+
+Close this step and proceed to find-work."""
+
+[[steps]]
 id = "find-work"
 title = "Find next work bead assigned to me or wait"
-needs = ["check-inbox"]
+needs = ["recovery-scan"]
 description = """
 **Config: event_timeout = {{event_timeout}}**
 
@@ -305,15 +436,50 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Burn this wisp: `gc bd mol burn <wisp-id> --force`
 
 3. If pre-existing on target:
-   - Check for duplicates first:
+
+   **⛔ SEARCH FIRST, AND TRUST A ZERO ONLY IF THE SEARCH ACTUALLY RAN.**
+   Until 2026-09-25 this step said `gc bd list ... --search`, which is not a
+   flag on `bd list`. It exited 1 with `unknown flag: --search` on every
+   invocation, printed no bug IDs, and so read as "no duplicate found" every
+   single time. The result: 9 of 16 open test-flake beads on ExecCoreAI were
+   filed by this step, and at least one pair (ex-f6yc28 and ex-quap0p) is the
+   same defect filed twice, one day apart. `bd search` is the correct command.
+
+   - Search by the TEST NAME or the distinctive error text, not by your prose
+     summary. A summary you just wrote will not match a summary someone else
+     wrote for the same failure; a test name matches exactly.
      ```bash
-     gc bd list --type=bug --status=open --search "<failure summary>"
+     # Pick the narrowest literal you have: the failing Test function name, the
+     # constraint name, or the verbatim error string. NOT your own wording.
+     NEEDLE="<TestFunctionName or verbatim error text>"
+     gc bd search "$NEEDLE" --limit 20 ; RC=$?
      ```
-   - If a matching bug already exists: note its ID and proceed with merge.
-   - If no duplicate: file a new bead:
+   - ⛔ **Do NOT pass `--status=open`.** `bd search` includes closed issues on
+     purpose, so that "was this already filed or already fixed?" cannot
+     silently answer no. A duplicate that was filed and closed last week is
+     still a duplicate, and refiling it is how a fixed bug comes back as new
+     work.
+   - ⛔ **If `RC` is not 0, the search DID NOT RUN. That is not an absence.**
+     Do not file. Fix the invocation or report the failure in your step notes
+     and mail the mayor. Treating a broken probe as "nothing found" is the
+     exact bug this block replaced.
+   - If a match exists (any status): note its ID, add a one-line comment to it
+     recording that this merge hit it again, and proceed with merge. Do not
+     file a second bead.
      ```bash
-     gc bd create --type=bug --priority=1 --title="Pre-existing failure: <summary>"
+     gc bd comment <existing-id> "Hit again by refinery on $BRANCH -> $TARGET at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
      ```
+   - If the match is CLOSED and the failure is real again, say so on that bead
+     and reopen it rather than filing a new one: `gc bd reopen <existing-id>`.
+   - Only if the search ran (RC=0) and returned nothing, file a new bead. Put
+     the TEST NAME in the title so the next search finds it:
+     ```bash
+     gc bd create --type=bug --priority=1 --title="Pre-existing failure: <TestFunctionName> - <short symptom>"
+     ```
+   - ⚠ If a later commit RENAMES the test, this bead's title now names a
+     function that greps to zero and reads as "already fixed". That happened to
+     ex-680wml for 21 days. If you notice a rename while searching, retitle the
+     existing bead instead of filing a new one.
    - Proceed with merge (failure not caused by this branch)
 
 **GATE**: Cannot merge without all checks passing OR pre-existing bug filed/found.
@@ -344,6 +510,116 @@ or `pr`, that is stale metadata from before this ruling, not an instruction.
 ⚠ `metadata.existing_pr` is **not a mode switch**. It means a polecat opened a PR
 it should not have. You still merge directly; you close that PR afterwards, in
 step 5.
+
+**0. ⛔ MIGRATION ORDINAL GATE — refuse a duplicate version, do not merge it.**
+
+Two branches in flight independently pick "next free" from their own branch
+points, so they pick the SAME number. Goose parses the version from the
+FILENAME, so two files at one version is a duplicate-version failure in every
+environment — and git never conflicts, because the paths differ. This has now
+happened three times (RFC019 twice, then ex-04xrft vs ex-cr8gc5 on 2026-09-03,
+across two UNRELATED beads at different tiers).
+
+```bash
+git fetch --prune origin
+# versions this branch INTRODUCES that are not on the target.
+# ⛔ Match '^[0-9]+', NOT '^[0-9]{5}'. Migrations are TIMESTAMPED since #869
+# (YYYYMMDDHHMMSS); the 5-digit form truncated 20260928180157 to '20260', so
+# EVERY timestamped migration collapsed to one bucket, nothing ever matched
+# "^20260_", and this duplicate gate silently passed everything for the whole
+# timestamp era. Verified dead on 2026-09-28. The legacy 00001-00420 files
+# still match '^[0-9]+' unchanged.
+NEW=$(git diff --name-only origin/$TARGET...origin/$BRANCH -- backend/migrations/sql \
+      | xargs -r -n1 basename | grep -oE '^[0-9]+' | sort -u)
+DUP=""
+for o in $NEW; do
+  # a file at this ordinal already on the target, with a DIFFERENT name
+  ON_TARGET=$(git ls-tree --name-only origin/$TARGET backend/migrations/sql/ \
+              | xargs -r -n1 basename | grep -E "^${o}_" || true)
+  MINE=$(git ls-tree --name-only origin/$BRANCH backend/migrations/sql/ \
+         | xargs -r -n1 basename | grep -E "^${o}_" || true)
+  if [ -n "$ON_TARGET" ] && [ "$ON_TARGET" != "$MINE" ]; then
+    DUP="$DUP $o($MINE vs $ON_TARGET)"
+  fi
+done
+```
+
+**Second: there is deliberately NO out-of-order check. A version BELOW the
+target's maximum is NORMAL in this repository — do not add one back.**
+
+`backend/migrations/sql/README.md` carries a section headed "Out-of-order
+arrival is normal now": versions no longer arrive in order and are not supposed
+to, `backend/cmd/migrate` passes `goose.WithAllowMissing` (and
+`backend/migrations/apply.go` the provider spelling, `WithAllowOutofOrder`), and
+gaps plus out-of-order versions are expected and mean nothing is wrong — in its
+own words, **do not "fix" them.** Two further lines on main agree:
+  `backend/cmd/migrate/main.go:95` passes `goose.WithAllowMissing()` in production.
+  `backend/internal/deploycheck/migration_version_guard_test.go:51` states that
+  this guard "no longer polices an ordinal CEILING".
+
+⛔⛔ THIS STEP ONCE HELD A CEILING CHECK, AND IT REJECTED A GOOD BEAD TWICE.
+On 2026-09-28 it rejected ex-1kfbld (migration 20260928180157, below main's max
+20260928193254) saying "goose will REJECT this in production" and demanding a
+renumber plus an update to every reference — after the bead had PASSED REVIEW
+TWICE, with both reviewers clearing that exact migration deliberately. The
+premise was false; the demanded renumber was broad churn on a migration-bearing
+branch for a defect that did not exist; and the check cited as its authority the
+very README that forbids it. Note also that the shell it ran could not produce
+the numbers it reported: with the old 5-digit extraction, MAXT and every new
+version both collapsed to '20260', so the comparison was always equal and the
+check was dead as written. It fired only because the agent re-derived the rule
+from this prose at full 14-digit precision. Do not restore it, and do not
+re-derive it: if you believe you have found a ceiling violation, you have found
+this note instead.
+
+⭐ WHY A REAL P1 ONCE DEMANDED THIS CHECK, AND WHY IT NO LONGER APPLIES. Do not
+restore the check on the strength of that bead. ex-zzr83l (2026-09-09, P1,
+closed) measured this hazard twice and built a below-ceiling guard in
+deploycheck. It was RIGHT AT THE TIME, and its own words say why: it cites
+`cmd/migrate/main.go:71` running plain `goose.UpContext` with NO AllowMissing, so
+goose then applied migrations strictly above the current version and a low one
+really did merge green and never run. THE REPOSITORY CHANGED UNDER IT. Migrations
+became timestamped (#869, 2026-09-22), `cmd/migrate` adopted
+`goose.WithAllowMissing`, and the deploycheck guard was deliberately de-scoped —
+`migration_version_guard_test.go:51` now says in terms that it no longer polices
+an ordinal CEILING. So ex-zzr83l is SUPERSEDED, not contradicted, and this
+formula simply kept the retired doctrine alive after the repository retired it.
+Check the three evidence lines above against origin/main before believing any
+argument to bring it back.
+
+⚠ One hazard from that bead does survive, and it is NOT a ceiling rule: filling
+one of the permanently ABANDONED ordinals the README lists (00072, 00073, 00085,
+00130, and the rest). Those were each used once on some database and then
+orphaned, so a new file under one of them can be skipped silently in production
+while applying normally in CI — the README calls that the one case where exactly
+that happens. It is gated in the repository, not here: the timestamp rule in
+`migration_version_guard_test.go` fails any pull request that numbers a migration
+any way other than by the clock, which makes a hand-picked abandoned ordinal
+impossible to add in the first place.
+
+⚠ The one real hazard is REUSE, and the check above is what catches it: once a
+version is recorded in `goose_db_version`, goose skips the file behind it
+forever — no error, no log line — and CI cannot see it because CI migrates a
+scratch database from zero. That is a name-vs-name comparison at a SHARED
+version, never "this version is low".
+
+If `$DUP` is non-empty: **STOP. Do not merge.** Reject the bead back to its pool
+so the polecat renumbers, exactly as a failed check does in handle-failures:
+
+```bash
+POLECAT_TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.worker_pool // empty')
+[ -z "$POLECAT_TARGET" ] && POLECAT_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat-sonnet"
+gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
+gc bd update $WORK --status=open --assignee="" \
+  --set-metadata rejection_reason="Migration ordinal collision:$DUP. Renumber to the next free ordinal on $TARGET and update every reference to it (test names, embedded lists, identifiers)." \
+  --set-metadata gc.routed_to="$POLECAT_TARGET"
+```
+Then pour the next patrol iteration and burn this wisp, as in handle-failures.
+
+⚠ Two cases that must NOT trip this gate: an ordinal whose file is already on the
+target under the SAME name (inherited, not new), and an ordinal the branch does
+not introduce at all. The comparison is name-vs-name at a shared ordinal, never
+"this ordinal exists".
 
 **1. Merge and push target branch:**
 ```bash

@@ -56,7 +56,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 11
+version = 12
 
 [vars]
 [vars.event_timeout]
@@ -370,9 +370,172 @@ gc bd update <bead> --set-metadata recovered=true
 Or no orphans found."""
 
 [[steps]]
+id = "scan-stalled-handoffs"
+title = "Scan for work that is done but invisible to every queue probe"
+needs = ["recover-orphaned-beads"]
+description = '''
+**Owner ruling 2026-10-01 (gc-wisp-hvsn399):** three distinct beads hit this
+family in one day. The invariant: a bead whose `review_status` is set, or
+whose work is pushed, must be visible to EXACTLY ONE queue probe
+(check-reviewer's `status=open`+unassigned, or check-refinery's
+`assignee=refinery`). The queue-health steps only scan for STALE work
+already sitting correctly in a queue — they are structurally blind to work
+that never reached a queue because the handoff died mid-flight. This step
+scans for that blind spot. `ex-fy9spj` is the worked example: reviewed
+(review_status=pass), routed (gc.routed_to=refinery), but assignee and
+status were never flipped because the reviewer session died first.
+
+⛔ **Liveness-by-name is not enough here — names are RECYCLED.** A session
+named `plato` or `nietzsche` that is alive right now may be a fresh
+incarnation, not the one that touched this bead. Resolve the EXACT holder
+by `metadata.gc.session_id` (not by matching the assignee string to a
+live session's name), and if that exact session_id is absent from
+`gc session list --state=all --json`, the holder is dead regardless of
+whether another session now shares its name. If a session with that name
+IS alive, compare its `creation_complete_at`/`awake_started_at` against the
+bead's `updated_at`: a live session created AFTER the bead last changed
+hands is a different incarnation and proves nothing about this bead's
+holder.
+
+**Case 1 — stalled post-review handoff (in_progress, review_status set, dead holder):**
+```bash
+NOW_EPOCH=$(date +%s)
+SESSIONS_JSON=$(gc session list --state=all --json)
+IN_PROGRESS=$(gc bd list --status=in_progress --json --limit=0)
+
+echo "$IN_PROGRESS" | jq -c '
+  .[] | select((.metadata.review_status // "") != "")
+      | {id, assignee, updated_at, review_status: .metadata.review_status,
+         routed_to: .metadata."gc.routed_to", session_id: .metadata."gc.session_id",
+         branch: .metadata.branch}' \
+| while read -r row; do
+    ID=$(echo "$row" | jq -r '.id')
+    SID=$(echo "$row" | jq -r '.session_id // empty')
+    ROUTED=$(echo "$row" | jq -r '.routed_to // empty')
+    BRANCH=$(echo "$row" | jq -r '.branch // empty')
+    [ -z "$SID" ] && continue
+    # Exact holder liveness by session_id, never by name.
+    ALIVE=$(echo "$SESSIONS_JSON" | jq --arg sid "$SID" '[.sessions[] | select(.id==$sid)] | length')
+    [ "$ALIVE" != "0" ] && continue   # genuinely still held, leave it
+    [ -z "$ROUTED" ] && continue      # nowhere recorded to send it, needs a human
+    echo "WITNESS: candidate stalled handoff $ID -> session $SID is dead, review_status set, routed_to=$ROUTED"
+    # ⭐ KNOWN GAP (mayor, ex-k8be7x.17, 2026-10-01): "branch exists on origin"
+    # confirms the BRANCH is real, not that the dead session's work REACHED
+    # origin. On ex-k8be7x.17 the dead session's worktree held 9 commits
+    # ahead of origin, one genuinely unique (an owner-correction
+    # implementation) -- origin still carried the overruled framing. Nothing
+    # was lost only because mayor caught it by hand and pushed a rescue
+    # branch. TODO before next trusting this step unattended: read the
+    # bead's work_dir, check `git -C "$WD" log --oneline @{u}..HEAD` and
+    # `git status --porcelain`; if either is non-empty, name the SHAs loudly
+    # in the recovery mail rather than silently proceeding. Compare by
+    # PATCH-ID, not SHA (a rebase re-SHAs identical content, so a plain SHA
+    # diff makes already-pushed commits look unique). NEVER push or
+    # force-push on the agent's behalf -- naming it is enough; a rebase
+    # makes the old tip a non-ancestor, so pushing belongs to the owning
+    # agent. Also: open+unassigned can be a RESTART WINDOW (a session mid-
+    # restart that still holds uncommitted work and will re-claim itself
+    # within minutes), not an abandoned claim -- this is why "check back a
+    # cycle later" matters more here than anywhere else in this formula.
+    # Verify the work is real before touching anything.
+    if [ -n "$BRANCH" ] && git -C /gc/projects/execcoreai ls-remote --heads origin "$BRANCH" | grep -q .; then
+      echo "WITNESS: $ID branch $BRANCH confirmed on origin -- completing the stalled handoff"
+      # ⛔ CONFIRMED BUG (caught live, ex-2md8xm, 2026-10-01): refinery is a
+      # single persistent session that polls check-refinery's own
+      # `--assignee=refinery --status=open`, so assignee=$ROUTED is correct
+      # there. But polecat and reviewer POOLS claim via `--unassigned` (per
+      # mayor's mail and pour-reviewer.sh's `--if-assignee ''` guard) --
+      # setting assignee=$ROUTED for a pool destination makes the bead
+      # invisible to the exact claim probe this step exists to unblock.
+      # Only refinery polls by assignee; every pool destination needs
+      # assignee cleared instead.
+      if [ "$ROUTED" = "ExecCoreAI/mmlac.refinery" ]; then
+        gc bd update "$ID" --status=open --assignee="$ROUTED" --set-metadata "witness.recovered=true" --force
+      else
+        gc bd update "$ID" --status=open --assignee="" --set-metadata "witness.recovered=true" --force
+      fi
+      gc mail send mayor/ -s "ORPHAN_RECOVERED: $ID stalled post-review handoff (dead holder $SID)" \
+        -m "review_status was set and routed_to=$ROUTED, but the holding session ($SID) died before flipping status/assignee. Branch $BRANCH verified on origin, not touched otherwise. Completed the handoff: status=open, gc.routed_to=$ROUTED unchanged, assignee set to $ROUTED only if that is refinery (polls by assignee) else cleared (pools claim unassigned)."
+    else
+      echo "WITNESS: $ID has review_status set but no verifiable branch on origin -- skipping, needs human judgment"
+    fi
+  done
+```
+
+**Case 2 — handoff to a bare pool alias (in_progress, assignee is a template name, not a session, review_status NOT yet set):**
+A bare pool alias (equal to a configured template name like
+`ExecCoreAI/mmlac.reviewer`, not a concrete instance) is never a valid
+resting assignee — nothing can claim a bead that is already "assigned" to
+a template. If `review_status` is unset, no review happened yet; the
+correct repair is to reopen it as fresh pool demand, not to route it
+directly past review.
+```bash
+echo "$IN_PROGRESS" | jq -c '
+  .[] | select((.metadata.review_status // "") == "")
+      | {id, assignee, updated_at, routed_to: .metadata."gc.routed_to"}' \
+| while read -r row; do
+    ID=$(echo "$row" | jq -r '.id')
+    ASSIGNEE=$(echo "$row" | jq -r '.assignee // empty')
+    [ -z "$ASSIGNEE" ] && continue
+    # A bare alias IS the template name itself -- check it resolves to no
+    # concrete session by exact id/session_name/alias/agent_name match.
+    MATCH=$(echo "$SESSIONS_JSON" | jq --arg a "$ASSIGNEE" '[.sessions[] | select(.id==$a or .session_name==$a or .alias==$a or .agent_name==$a)] | length')
+    [ "$MATCH" != "0" ] && continue   # resolves to a real session, leave it
+    echo "WITNESS: candidate bare-alias handoff $ID -> assignee '$ASSIGNEE' resolves to no session"
+    gc bd update "$ID" --status=open --assignee="" --force
+    gc mail send mayor/ -s "ORPHAN_RECOVERED: $ID was assigned to bare pool alias '$ASSIGNEE'" \
+      -m "No review_status set, assignee resolved to no concrete session (template name, not an instance). Reopened as unassigned pool demand (status=open, assignee cleared) rather than routing past review."
+  done
+```
+
+**Case 3 — misrouted rework (open, gc.routed_to names the WRONG polecat
+variant vs gc.execution_routed_to):**
+`gc.execution_routed_to` is the reliable record of which variant pool
+(opus vs sonnet) originally did the work; `gc.routed_to` is what a later
+hand-back actually points at. When they disagree on the POLECAT VARIANT,
+the hand-back is misrouted and will never be claimed by the pool that can
+actually act on it.
+
+⚠ **These two fields are EXPECTED to diverge during normal pipeline
+progression** — `gc.execution_routed_to` is a historical record of the
+original implementing pool and stays fixed, while `gc.routed_to` legitimately
+moves on to `refinery`, `reviewer`, `core.control-dispatcher`, etc. as the
+bead advances. A plain inequality check false-positives on nearly every
+bead that has passed review (confirmed live: `ex-bkhq31` with
+`routed_to=refinery`, `execution_routed_to=polecat-opus` is a normal PASS,
+not a misroute). The match must require BOTH fields to name a polecat
+variant pool — only then is comparing them meaningful.
+```bash
+ALL_OPEN=$(gc bd list --status=open --json --limit=0)
+echo "$ALL_OPEN" | jq -c '
+  .[] | select((.metadata."gc.routed_to" // "" | test("polecat-"))
+               and (.metadata."gc.execution_routed_to" // "" | test("polecat-"))
+               and .metadata."gc.routed_to" != .metadata."gc.execution_routed_to")
+      | {id, routed_to: .metadata."gc.routed_to", exec_routed_to: .metadata."gc.execution_routed_to"}' \
+| while read -r row; do
+    ID=$(echo "$row" | jq -r '.id')
+    EXEC_ROUTED=$(echo "$row" | jq -r '.exec_routed_to')
+    echo "WITNESS: candidate misroute $ID -- routed_to disagrees with execution_routed_to=$EXEC_ROUTED"
+    gc bd update "$ID" --set-metadata "gc.routed_to=$EXEC_ROUTED"
+    gc mail send mayor/ -s "ORPHAN_RECOVERED: $ID gc.routed_to corrected to match gc.execution_routed_to" \
+      -m "Variant mismatch (opus vs sonnet) between gc.routed_to and gc.execution_routed_to. Realigned gc.routed_to to the reliable execution_routed_to value ($EXEC_ROUTED)."
+  done
+```
+
+**Important:** `--force` is for the hold-check only, and only after the
+exact-session-id liveness check above already proved the holder dead —
+never force past a check you have not independently verified. Case 3 does
+not need `--force`; it is a metadata correction, not a reassignment.
+
+**Exit criteria:** All three candidate shapes checked. Every repair logged
+and mailed to mayor (these are rare and worth a record, unlike routine
+orphan-pool recoveries). No candidates found is a normal, quiet exit.
+'''
+
+[[steps]]
 id = "check-refinery"
 title = "Check refinery queue health"
-needs = ["recover-orphaned-beads"]
+needs = ["scan-stalled-handoffs"]
 description = """
 Detect refineries that have work queued but aren't draining it.
 
